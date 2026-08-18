@@ -4,6 +4,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from bot.config import LOG_LEVEL, TELEGRAM_BOT_TOKEN
+from bot.handlers.product_draft import build_conversation_handler
 from bot.handlers.start import help_command, start
 
 logging.basicConfig(
@@ -21,6 +22,7 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(build_conversation_handler())
     application.add_error_handler(_error_handler)
 
     return application

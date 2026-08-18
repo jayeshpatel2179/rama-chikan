@@ -13,3 +13,8 @@ venv/
 
 # Logs
 *.log
+
+# Personal planning notes — not part of the codebase
+PROJECT_SPEC.md
+PROJECT_SPEC.html
+rama-chikan-final-plan.html
