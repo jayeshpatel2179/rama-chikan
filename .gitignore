@@ -1,0 +1,15 @@
+# Secrets — never commit these
+.env
+rama-chikan keys.txt
+*secret*
+*.key
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Logs
+*.log
