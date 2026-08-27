@@ -1,0 +1,104 @@
+
+
+{% liquid
+  assign block_settings = block.settings
+  assign heading = block_settings.heading | default: 'Policies'
+  assign show_as_accordion = block_settings.show_as_accordion
+%}
+
+{% if shop.policies.size > 0 %}
+  {%- liquid
+    assign menu_class = 'menu'
+    if show_as_accordion == true
+      assign menu_class = menu_class | append: ' menu--accordion'
+    endif
+    assign should_disable_on_mobile = false
+    assign should_open_by_default_on_mobile = false
+    if show_as_accordion == false
+      assign should_disable_on_mobile = true
+      assign should_open_by_default_on_mobile = true
+    endif
+  -%}
+  {% capture menu_accordion_children %}
+    <details
+      class="menu__details spacing-style"
+      data-testid="footer-policy-links-details"
+      style="--spacing--size: {{ block_settings.menu_spacing }}px;"
+      {% if show_as_accordion == false %}
+        open
+      {% endif %}
+      {{ block.shopify_attributes }}
+    >
+      <summary class="menu__heading h3">
+        <span class="menu__heading__default">{{ heading }}</span>
+        <span class="menu__heading__accordion">
+          {{ heading }}
+          <span class="menu__heading__toggle svg-wrapper icon-caret icon-animated">
+            {{- 'icon-caret.svg' | inline_asset_content -}}
+          </span>
+        </span>
+      </summary>
+
+      <nav class="details-content" aria-label="{{ heading | escape }}">
+        <ul class="list-unstyled">
+          {% for policy in shop.policies %}
+            {% if policy != blank %}
+              <li class="menu__item paragraph">
+                <a href="{{ policy.url }}">{{ policy.title }}</a>
+              </li>
+            {% endif %}
+          {% endfor %}
+        </ul>
+      </nav>
+    </details>
+  {% endcapture %}
+  {% render 'accordion-custom-component',
+    children: menu_accordion_children,
+    class: menu_class,
+    disable_on_desktop: true,
+    open_by_default_on_desktop: true,
+    disable_on_mobile: should_disable_on_mobile,
+    open_by_default_on_mobile: should_open_by_default_on_mobile
+  %}
+{% endif %}
+
+{% schema %}
+{
+  "name": "Policy links",
+  "tag": null,
+  "settings": [
+    {
+      "type": "paragraph",
+      "content": "Lists your store's Shipping, Refund, Privacy, and Terms of Service pages (Settings > Policies) as direct links."
+    },
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "t:settings.heading",
+      "default": "Policies"
+    },
+    {
+      "type": "range",
+      "id": "menu_spacing",
+      "label": "t:settings.vertical_gap",
+      "min": 0,
+      "max": 50,
+      "step": 1,
+      "unit": "px",
+      "default": 12
+    },
+    {
+      "type": "checkbox",
+      "id": "show_as_accordion",
+      "label": "t:settings.show_as_accordion",
+      "default": false
+    }
+  ],
+  "presets": [
+    {
+      "name": "Policy links",
+      "category": "t:categories.footer"
+    }
+  ]
+}
+{% endschema %}

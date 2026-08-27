@@ -1,0 +1,262 @@
+{% doc %}
+  Renders the "What's your colour?" discovery popup, shown once per visitor
+  session before they browse the site. Skippable; tapping a swatch filters
+  straight into that colour on the full catalogue via Shopify's native
+  Search & Discovery colour filter.
+
+  Uses a plain native <dialog> (showModal()) rather than the theme's
+  <theme-drawer> component — that component only runs in modal mode (native
+  backdrop, top-layer) below the mobile breakpoint; above it, it falls back
+  to a non-modal side-drawer .show(), which left this popup with no backdrop
+  and no true centering on desktop.
+
+  @example
+  {% render 'colour-quiz-popup' %}
+{% enddoc %}
+
+{% liquid
+  assign quiz_colors = 'White,#F7F3EC|Ivory,#EFE6D8|Peach,#F3C9A8|Powder Blue,#B9D4E0|Mint Green,#B9D9BE|Blush Pink,#E9BFC4|Mustard Yellow,#D9A441|Black,#2B2420' | split: '|'
+%}
+
+<dialog
+  id="colour-quiz-dialog"
+  class="colour-quiz-dialog"
+  aria-label="{{ 'content.colour_quiz_title' | t }}"
+>
+  <div class="colour-quiz">
+    <button
+      type="button"
+      class="colour-quiz__close"
+      aria-label="{{ 'accessibility.close' | t }}"
+      data-colour-quiz-close
+    >
+      <span class="svg-wrapper">{{ 'icon-close.svg' | inline_asset_content }}</span>
+    </button>
+
+    <p class="colour-quiz__eyebrow">{{ 'content.colour_quiz_eyebrow' | t }}</p>
+    <h2 class="colour-quiz__heading">{{ 'content.colour_quiz_title' | t }}</h2>
+    <p class="colour-quiz__subtext">{{ 'content.colour_quiz_subtext' | t }}</p>
+
+    <div class="colour-quiz__swatches">
+      {% for entry in quiz_colors %}
+        {% assign parts = entry | split: ',' %}
+        {% assign color_name = parts[0] %}
+        {% assign color_hex = parts[1] %}
+        <a
+          href="/collections/all?filter.v.option.color={{ color_name | url_encode }}"
+          class="colour-quiz__swatch-link"
+          data-colour-quiz-choice
+        >
+          <span
+            class="colour-quiz__swatch"
+            style="--swatch-color: {{ color_hex }};"
+          ></span>
+          <span class="colour-quiz__swatch-label">{{ color_name }}</span>
+        </a>
+      {% endfor %}
+    </div>
+
+    <button
+      type="button"
+      class="colour-quiz__skip"
+      data-colour-quiz-close
+    >
+      {{ 'content.colour_quiz_skip' | t }}
+    </button>
+  </div>
+</dialog>
+
+<script type="module">
+  (function () {
+    const STORAGE_KEY = 'ramaChikanColourQuizSeen';
+    const dialog = document.getElementById('colour-quiz-dialog');
+    if (!dialog) return;
+
+    function markSeen() {
+      sessionStorage.setItem(STORAGE_KEY, '1');
+    }
+
+    function closeQuiz() {
+      markSeen();
+      if (dialog.open) dialog.close();
+    }
+
+    function openQuizOnce() {
+      if (sessionStorage.getItem(STORAGE_KEY)) return;
+      if (typeof dialog.showModal !== 'function') return;
+      requestAnimationFrame(() => dialog.showModal());
+    }
+
+    dialog.querySelectorAll('[data-colour-quiz-close]').forEach((el) => {
+      el.addEventListener('click', closeQuiz);
+    });
+
+    dialog.querySelectorAll('[data-colour-quiz-choice]').forEach((el) => {
+      el.addEventListener('click', markSeen);
+    });
+
+    // Click on the backdrop (the dialog element itself, outside the inner
+    // wrapper) closes it, same as tapping outside any other modal.
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) closeQuiz();
+    });
+
+    // Escape / other native dismissal (e.g. browser chrome) still counts as seen.
+    dialog.addEventListener('close', markSeen);
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', openQuizOnce);
+    } else {
+      openQuizOnce();
+    }
+  })();
+</script>
+
+{% stylesheet %}
+  .colour-quiz-dialog {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    max-width: 480px;
+    width: min(90vw, 480px);
+    max-height: min(85svh, 640px);
+    border-radius: var(--style-border-radius-popover, 20px);
+    border: none;
+    padding: 0;
+    z-index: var(--layer-modal, 999);
+  }
+
+  .colour-quiz-dialog::backdrop {
+    background: rgb(var(--backdrop-color-rgb, 0 0 0) / var(--backdrop-opacity, 0.5));
+  }
+
+  .colour-quiz-dialog[open] {
+    animation: colour-quiz-fade-in 220ms ease;
+  }
+
+  @keyframes colour-quiz-fade-in {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  .colour-quiz {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+    padding: 44px 32px 32px;
+    background: #fffdfb;
+    color: rgb(var(--color-foreground-rgb));
+    border-radius: var(--style-border-radius-popover, 20px);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22);
+  }
+
+  .colour-quiz__close {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: currentColor;
+    cursor: pointer;
+  }
+
+  .colour-quiz__close svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+  }
+
+  .colour-quiz__eyebrow {
+    margin: 0;
+    font-family: var(--font-accent--family);
+    font-size: 0.75rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+
+  .colour-quiz__heading {
+    margin: 0;
+    font-family: var(--font-heading--family);
+    font-size: clamp(1.75rem, 4vw, 2.25rem);
+    line-height: 1.15;
+  }
+
+  .colour-quiz__subtext {
+    margin: 0 0 8px;
+    max-width: 34ch;
+    font-family: var(--font-body--family);
+    font-size: 0.95rem;
+    opacity: 0.75;
+  }
+
+  .colour-quiz__swatches {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 18px 14px;
+    width: 100%;
+    padding-block: 8px 4px;
+  }
+
+  .colour-quiz__swatch-link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    text-decoration: none;
+    color: currentColor;
+  }
+
+  .colour-quiz__swatch {
+    display: block;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background-color: var(--swatch-color);
+    border: 1px solid rgba(var(--color-foreground-rgb), 0.18);
+    transition: transform 180ms ease;
+  }
+
+  .colour-quiz__swatch-link:hover .colour-quiz__swatch,
+  .colour-quiz__swatch-link:focus-visible .colour-quiz__swatch {
+    transform: scale(1.12);
+    box-shadow: 0 6px 14px rgba(var(--color-foreground-rgb), 0.22);
+  }
+
+  .colour-quiz__swatch-label {
+    font-family: var(--font-body--family);
+    font-size: 0.7rem;
+    opacity: 0.75;
+  }
+
+  .colour-quiz__skip {
+    margin-top: 14px;
+    border: none;
+    background: transparent;
+    font-family: var(--font-body--family);
+    font-size: 0.82rem;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    opacity: 0.6;
+    cursor: pointer;
+    color: currentColor;
+  }
+
+  .colour-quiz__skip:hover {
+    opacity: 1;
+  }
+{% endstylesheet %}

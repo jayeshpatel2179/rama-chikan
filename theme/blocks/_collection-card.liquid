@@ -1,0 +1,218 @@
+
+
+{% assign collection = closest.collection %}
+
+{% comment %}
+  use_shuffle_images: opt-in flag (default off) so ONLY the homepage
+  "Shop by Category" section's static block (theme/templates/index.json)
+  gets the live product-photo shuffle. Every other usage of this shared
+  block (e.g. the /collections page via sections/main-collection-list.liquid)
+  is untouched and keeps the normal single collection.image behavior.
+
+  NOTE: Shopify's static-block resolution requires a LITERAL string for
+  content_for's `type:` argument (a variable is silently unresolvable, not
+  just a lint nitpick) — so this has to be two separate literal calls, not
+  one call with a computed type.
+{% endcomment %}
+{% capture card_image %}
+  {% if block.settings.use_shuffle_images %}
+    {% content_for 'block',
+      type: '_collection-card-image-shuffle',
+      id: 'collection-card-image',
+      closest.collection: collection,
+      parent_block_id: block.id %}
+  {% else %}
+    {% content_for 'block',
+      type: '_collection-card-image',
+      id: 'collection-card-image',
+      closest.collection: collection,
+      parent_block_id: block.id %}
+  {% endif %}
+{% endcapture %}
+
+{% capture children %}
+  {% content_for 'blocks', closest.collection: collection %}
+{% endcapture %}
+
+{% render 'collection-card',
+  card_image: card_image,
+  children: children,
+  block: block,
+  collection: collection,
+  section: section
+%}
+
+{% schema %}
+{
+  "name": "t:names.collection_card",
+  "blocks": [
+    {
+      "type": "text"
+    },
+    {
+      "type": "spacer"
+    },
+    {
+      "type": "button"
+    },
+    {
+      "type": "group"
+    },
+    {
+      "type": "collection-title"
+    }
+  ],
+  "tag": null,
+  "settings": [
+    {
+      "type": "paragraph",
+      "content": "t:content.resource_reference_collection_card"
+    },
+    {
+      "type": "checkbox",
+      "id": "use_shuffle_images",
+      "label": "Live product-photo shuffle (homepage Shop by Category only)",
+      "default": false
+    },
+    {
+      "type": "header",
+      "content": "t:content.text"
+    },
+    {
+      "type": "select",
+      "id": "placement",
+      "label": "t:settings.placement",
+      "options": [
+        {
+          "value": "on_image",
+          "label": "t:options.on_image"
+        },
+        {
+          "value": "below_image",
+          "label": "t:options.below_image"
+        }
+      ]
+    },
+    {
+      "type": "select",
+      "id": "horizontal_alignment",
+      "label": "t:settings.alignment",
+      "options": [
+        {
+          "value": "flex-start",
+          "label": "t:options.left"
+        },
+        {
+          "value": "center",
+          "label": "t:options.center"
+        },
+        {
+          "value": "flex-end",
+          "label": "t:options.right"
+        }
+      ],
+      "default": "flex-start"
+    },
+    {
+      "type": "select",
+      "id": "vertical_alignment",
+      "label": "t:settings.position",
+      "options": [
+        {
+          "value": "flex-start",
+          "label": "t:options.top"
+        },
+        {
+          "value": "center",
+          "label": "t:options.center"
+        },
+        {
+          "value": "flex-end",
+          "label": "t:options.bottom"
+        }
+      ],
+      "default": "center",
+      "visible_if": "{{ block.settings.placement == \"on_image\" }}"
+    },
+    {
+      "type": "range",
+      "id": "collection_card_gap",
+      "label": "t:settings.vertical_gap",
+      "min": 0,
+      "max": 50,
+      "step": 1,
+      "unit": "px",
+      "default": 8
+    },
+    {
+      "type": "header",
+      "content": "t:content.appearance"
+    },
+    {
+      "type": "color",
+      "id": "background_color",
+      "label": "t:settings.background_color",
+      "placeholder": "t:settings.default"
+    },
+    {
+      "type": "header",
+      "content": "t:content.borders"
+    },
+    {
+      "type": "select",
+      "id": "border",
+      "label": "t:settings.style",
+      "options": [
+        {
+          "value": "none",
+          "label": "t:options.none"
+        },
+        {
+          "value": "solid",
+          "label": "t:options.solid"
+        }
+      ],
+      "default": "none"
+    },
+    {
+      "type": "range",
+      "id": "border_width",
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "unit": "px",
+      "label": "t:settings.thickness",
+      "default": 1,
+      "visible_if": "{{ block.settings.border != 'none' }}"
+    },
+    {
+      "type": "range",
+      "id": "border_opacity",
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "unit": "%",
+      "label": "t:settings.opacity",
+      "default": 100,
+      "visible_if": "{{ block.settings.border != 'none' }}"
+    },
+    {
+      "type": "color",
+      "id": "border_color",
+      "label": "t:settings.color",
+      "placeholder": "t:settings.default",
+      "visible_if": "{{ block.settings.border != 'none' }}"
+    },
+    {
+      "type": "range",
+      "id": "border_radius",
+      "label": "t:settings.border_radius",
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "unit": "px",
+      "default": 0
+    }
+  ]
+}
+{% endschema %}

@@ -1,0 +1,190 @@
+{%- doc -%}
+  Live, auto-shuffling collection tile image — built for the homepage
+  "Shop by Category" section ONLY (theme/templates/index.json ->
+  category_tiles -> static-collection-card -> collection-card-image).
+
+  Unlike the stock `_collection-card-image` block (which shows one manually
+  set collection.image, or the theme-editor cached first product image),
+  this block always reads the collection's CURRENT product list live on
+  every page load, and fades between several of those products' real
+  photos client-side. Two direct consequences, both intentional:
+
+    - Delete a product in the Telegram bot -> it disappears from Shopify's
+      collection.products immediately -> it can never appear in this tile
+      again. No stale/deleted-product images, no manual re-sync needed.
+    - Add product #201 to a 200-product category -> it's just part of the
+      live pool next page load, no theme edit required.
+
+  Scope: do not reuse this for other sections/pages. The stock
+  `_collection-card-image` block (used by sections/main-collection-list.liquid,
+  i.e. the /collections page) is untouched on purpose.
+
+  @param {object} closest.collection - the collection this tile represents
+{%- enddoc -%}
+
+{% liquid
+  assign collection = closest.collection
+  assign max_images = block.settings.max_images | default: 5
+  assign rotation_seconds = block.settings.rotation_seconds | default: 4
+  assign product_count = collection.products.size
+
+  assign ratio = 1
+  case block.settings.image_ratio
+    when 'landscape'
+      assign ratio = '16 / 9'
+    when 'portrait'
+      assign ratio = '4 / 5'
+    when 'square'
+      assign ratio = '1 / 1'
+    when 'adapt'
+      assign ratio = collection.products.first.featured_image.aspect_ratio
+  endcase
+  if ratio == 0 or ratio == null
+    assign ratio = 1
+  endif
+
+  assign widths = '240, 352, 480, 700, 900'
+  assign sizes = '(min-width: 750px) 20vw, 50vw'
+%}
+
+{% style %}
+  .collection-card[data-block-id="{{ parent_block_id }}"] {
+    --ratio: {{ ratio }};
+  }
+{% endstyle %}
+
+{% if product_count > 0 %}
+  <div
+    class="resource-image collection-card__image category-shuffle"
+    data-rotation-ms="{{ rotation_seconds | times: 1000 }}"
+    {{ block.shopify_attributes }}
+  >
+    {% for product in collection.products limit: max_images %}
+      {% liquid
+        assign img_class = 'resource-image__image category-shuffle__img'
+        if forloop.first
+          assign img_class = img_class | append: ' category-shuffle__img--active'
+        endif
+        assign img_loading = 'lazy'
+        if forloop.first
+          assign img_loading = 'eager'
+        endif
+      %}
+      {{
+        product.featured_image
+        | image_url: width: 1600
+        | image_tag: widths: widths, class: img_class, sizes: sizes, loading: img_loading, alt: collection.title
+      }}
+    {% endfor %}
+  </div>
+{% else %}
+  {% comment %}
+    0 live products right now. Deliberately NOT falling back to
+    collection.image here — that field is a leftover manual/bot-set value
+    that survives product deletion, which is exactly the stale/hardcoded
+    image this block exists to avoid. An empty category always shows the
+    plain placeholder, same as any other empty collection on this theme.
+  {% endcomment %}
+  <div class="resource-image resource-image--placeholder collection-card__image collection-card__image--placeholder" {{ block.shopify_attributes }}>
+    <div class="resource-image__image">
+      {{ 'collection-apparel-1' | placeholder_svg_tag }}
+    </div>
+  </div>
+{% endif %}
+
+{% stylesheet %}
+  .category-shuffle {
+    position: relative;
+  }
+
+  .category-shuffle__img {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 1.2s ease;
+  }
+
+  .category-shuffle__img--active {
+    position: relative;
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .category-shuffle__img {
+      transition: none;
+    }
+  }
+{% endstylesheet %}
+
+{% javascript %}
+  (function () {
+    if (window.__categoryShuffleInit) return;
+    window.__categoryShuffleInit = true;
+
+    var prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReducedMotion) return;
+
+    document.querySelectorAll('.category-shuffle').forEach(function (tile) {
+      var images = tile.querySelectorAll('.category-shuffle__img');
+      if (images.length < 2) return;
+
+      var intervalMs = parseInt(tile.dataset.rotationMs, 10) || 4000;
+      var current = 0;
+      // Stagger each tile's start slightly so a whole row doesn't flip in unison.
+      var startDelay = Math.random() * intervalMs;
+
+      setTimeout(function () {
+        setInterval(function () {
+          var next = (current + 1) % images.length;
+          images[current].classList.remove('category-shuffle__img--active');
+          images[next].classList.add('category-shuffle__img--active');
+          current = next;
+        }, intervalMs);
+      }, startDelay);
+    });
+  })();
+{% endjavascript %}
+
+{% schema %}
+{
+  "name": "t:names.collection_card_image",
+  "tag": null,
+  "settings": [
+    {
+      "type": "paragraph",
+      "content": "Cycles through this category's own current products, live — never a fixed/hardcoded image. Used only by the homepage Shop by Category section."
+    },
+    {
+      "type": "select",
+      "id": "image_ratio",
+      "label": "t:settings.aspect_ratio",
+      "options": [
+        { "value": "adapt", "label": "t:options.auto" },
+        { "value": "portrait", "label": "t:options.portrait" },
+        { "value": "square", "label": "t:options.square" },
+        { "value": "landscape", "label": "t:options.landscape" }
+      ],
+      "default": "portrait"
+    },
+    {
+      "type": "range",
+      "id": "max_images",
+      "label": "Max products to rotate through",
+      "min": 2,
+      "max": 8,
+      "step": 1,
+      "default": 5
+    },
+    {
+      "type": "range",
+      "id": "rotation_seconds",
+      "label": "Seconds between image changes",
+      "min": 2,
+      "max": 10,
+      "step": 1,
+      "unit": "s",
+      "default": 4
+    }
+  ]
+}
+{% endschema %}

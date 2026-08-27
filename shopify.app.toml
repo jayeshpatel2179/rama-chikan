@@ -1,0 +1,18 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "c56ce63dbe053139ff364746657c2b65"
+name = "Rama Chikan Agent"
+application_url = "https://example.com"
+embedded = true
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_checkout_and_accounts_configurations,write_checkout_and_accounts_configurations,read_customers,write_customers,read_discounts,write_discounts,write_files,read_gift_cards,write_gift_cards,write_inventory,read_inventory,read_legal_policies,write_legal_policies,read_locations,read_markets,read_metaobjects,write_metaobjects,read_online_store_navigation,write_online_store_navigation,read_orders,write_orders,read_products,write_products,write_publications,read_shipping,write_shipping,read_content,write_content,read_themes,write_themes,read_translations,write_translations"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ ]
+
+[webhooks]
+api_version = "2026-07"
