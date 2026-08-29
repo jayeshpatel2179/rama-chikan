@@ -67,10 +67,15 @@ async def generate_model_images(
     kurti_length: str,
     listing_type: str,
     resolved_poses: list[int],
+    categories: list[str],
 ) -> tuple[list[bytes], list[int], list[int]]:
     """resolved_poses: the ordered pose ids already resolved by
     bot.prompts.resolve_pose_selection (Question 9 answer + eligibility
     filtering already applied by the caller).
+
+    categories: Question 5's answer — resolved ONCE per product into a
+    MODEL_AGE bucket (bot.prompts.resolve_model_age_bucket) and reused in
+    every image's prompt, same as background_preset/product_identity below.
 
     Returns (images, pose_ids_generated, pose_ids_queued) — queued is
     whatever's left in resolved_poses past IMAGE_GENERATION_CAP, reported
@@ -81,6 +86,7 @@ async def generate_model_images(
 
     background_preset = prompts.pick_background_preset()
     product_identity = prompts.pick_product_identity()
+    model_age = prompts.resolve_model_age_bucket(categories)
     used_gesture_combos: set = set()
 
     results: list[bytes] = []
@@ -108,6 +114,7 @@ async def generate_model_images(
             product_identity=product_identity,
             variation=variation,
             has_face_reference=face_reference is not None,
+            model_age=model_age,
         )
 
         response = await _client.images.edit(

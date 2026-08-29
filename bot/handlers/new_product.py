@@ -3,6 +3,8 @@ import html as html_lib
 import io
 import logging
 import re
+import time
+import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.ext import (
@@ -30,11 +32,13 @@ WAITING_PHOTOS, WAITING_ANSWERS, CONFIRMING = range(3)
 MAX_RAW_PHOTOS = 6
 
 # There's no per-photo angle tagging in the intake flow — the owner just
-# sends 1-6 undifferentiated raw photos. Poses 10/11 (back view) require a
-# back-side reference (bot/prompts.py POSES), and this codebase has no
-# reliable way to know if one of the raw photos is actually the back yet.
-# Hardcoded False rather than guessed, per the "never invent" safety rule —
-# revisit if/when the intake flow adds real per-photo angle tagging.
+# sends 1-6 undifferentiated raw photos. Poses 10/11 (back view) normally
+# need a back-side reference (bot/prompts.py POSES), and this codebase has
+# no reliable way to know if one of the raw photos is actually the back.
+# Hardcoded False rather than guessed, per the "never invent" safety rule.
+# NOTE: this only gates the bot's own AUTO pose picks (Question 9 answered
+# with just a count) — when the owner explicitly names pose numbers,
+# resolve_pose_selection() trusts them and does not apply this gate at all.
 _HAS_BACK_REFERENCE = False
 
 # Short menu labels for the chat — distinct from POSES[n].label (which is
@@ -74,14 +78,69 @@ _QUESTIONS_MESSAGE = (
     "6. Is this a best-selling kurti? (yes/no)\n"
     "7. Kurti length — short or long?\n"
     "8. What's in this listing — kurti + pyjama set, or kurti only?\n"
-    "9. How many images, and which poses? Reply with the pose numbers you "
-    "want, e.g. \"1, 5, 3\" — or just give a number like \"4\" and I'll pick "
-    "the best-selling combination.\n" + _POSE_MENU
+    "9. How many images, and which poses? Reply with pose numbers, e.g. "
+    "\"1, 5, 3\" — or type \"all poses\" for all 11 — or just give a number "
+    "like \"4\" and I'll pick the best combination.\n" + _POSE_MENU
 )
+
+_ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
+
+# The ready-to-post draft (generated images + description, sitting in memory
+# waiting for a GO LIVE tap) expires 10 minutes after it's generated. GO LIVE
+# and Regenerate Description both stop working past this and tell the owner
+# it expired; ABORT always keeps working regardless, so an expired draft can
+# still be cleared out without waiting for a fresh /cancel.
+DRAFT_TTL_SECONDS = 10 * 60
+
+
+def _new_session_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _draft_expired(draft: dict) -> bool:
+    ready_at = draft.get("ready_at")
+    return ready_at is not None and (time.monotonic() - ready_at) > DRAFT_TTL_SECONDS
+
+
+def _draft_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ GO LIVE", callback_data=f"go_live:{session_id}")],
+            [InlineKeyboardButton("🔁 Regenerate description", callback_data=f"regenerate_desc:{session_id}")],
+            [InlineKeyboardButton("❌ ABORT", callback_data=f"abort:{session_id}")],
+        ]
+    )
+
+
+async def _reply_dead_session(query) -> None:
+    await query.answer()
+    await query.message.reply_text("This draft was cancelled. Please start again.")
+
+
+async def _reply_expired(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await query.answer("⏰ This draft has expired — send new photos to start again.", show_alert=True)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "This draft expired (ready for more than 10 minutes) — send new photos to start again."
+    )
+    context.chat_data.clear()
+
+
+def _live_draft(context: ContextTypes.DEFAULT_TYPE, session_id: str) -> dict | None:
+    """Fetch the chat's draft only if it's still the SAME session that
+    produced the button being tapped. Returns None for a dead/cancelled/
+    already-finished session or a stale button from an earlier one — the
+    caller is expected to reply accordingly rather than crash or no-op."""
+    draft = context.chat_data.get("draft")
+    if draft is None or draft.get("session_id") != session_id:
+        return None
+    return draft
 
 
 async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    draft = context.user_data.setdefault("draft", {})
+    draft = context.chat_data.setdefault("draft", {})
+    draft.setdefault("session_id", _new_session_id())
+    draft["active_task"] = asyncio.current_task()
     raw_photos = draft.setdefault("raw_photos", [])
 
     largest = update.message.photo[-1]
@@ -96,6 +155,9 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # same photo count (i.e. no further photo arrived while it waited) is
     # the last one in the batch, and finalizes for everyone.
     await asyncio.sleep(_PHOTO_BATCH_DEBOUNCE_SECONDS)
+    if context.chat_data.get("draft") is not draft:
+        # Session was cancelled (or replaced) while this was asleep.
+        return ConversationHandler.END
     if len(raw_photos) != count_after_this_photo:
         return WAITING_PHOTOS
 
@@ -103,7 +165,9 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 
 async def _finish_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    draft = context.user_data["draft"]
+    draft = context.chat_data.get("draft")
+    if draft is None:
+        return ConversationHandler.END
     message = update.effective_message
     count = len(draft["raw_photos"])
 
@@ -111,6 +175,7 @@ async def _finish_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Received {count} photo(s) — that's all the photos. Looking at them now..."
     )
     draft["color"] = await ai.detect_color(draft["raw_photos"])
+    draft.pop("active_task", None)
 
     await message.reply_text(_QUESTIONS_MESSAGE)
     return WAITING_ANSWERS
@@ -124,7 +189,9 @@ async def photo_during_answers(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    draft = context.user_data["draft"]
+    draft = context.chat_data.get("draft")
+    if draft is None:
+        return ConversationHandler.END
     text = update.message.text.strip()
 
     try:
@@ -135,6 +202,14 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Couldn't read that — please reply with all 9 answers in one message."
         )
         return WAITING_ANSWERS
+
+    # Deterministic shortcut — don't rely solely on the LLM catching this.
+    if _ALL_POSES_RE.search(text):
+        parsed["pose_request"] = {
+            "mode": "specific",
+            "pose_numbers": list(prompts.POSES),
+            "count": 0,
+        }
 
     invalid_sizes = [s["size"] for s in parsed["sizes"] if s["size"] not in VALID_SIZES]
     if invalid_sizes or not parsed["sizes"]:
@@ -171,56 +246,121 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         parsed["price"], parsed["discount_pct"]
     )
 
-    resolved_poses, skipped_poses = prompts.resolve_pose_selection(
+    selected, blocked = prompts.resolve_pose_selection(
         parsed["pose_request"], draft["listing_type"], _HAS_BACK_REFERENCE
     )
-    if not resolved_poses:
+    if not selected and not blocked:
         await update.message.reply_text(
             "Couldn't resolve any poses from that — reply with pose numbers "
-            "like \"1, 5, 3\" or a count like \"4\" for question 9 "
-            "(please resend all 9 answers)."
+            "like \"1, 5, 3\", \"all poses\", or a count like \"4\" for "
+            "question 9 (please resend all 9 answers)."
         )
         return WAITING_ANSWERS
-    draft["resolved_poses"] = resolved_poses
-    draft["skipped_poses"] = skipped_poses
 
+    if blocked:
+        draft["pending_selected_poses"] = selected
+        block_lines = "\n".join(f"- Pose {p}: {reason}" for p, reason in blocked)
+        buttons = []
+        if selected:
+            buttons.append(
+                [InlineKeyboardButton(
+                    "▶️ Proceed without these",
+                    callback_data=f"proceed_blocked:{draft['session_id']}",
+                )]
+            )
+        buttons.append(
+            [InlineKeyboardButton(
+                "📷 Resend answers / new photo",
+                callback_data=f"cancel_blocked:{draft['session_id']}",
+            )]
+        )
+        msg = "Can't generate some of the poses you asked for:\n" + block_lines
+        if selected:
+            msg += f"\n\nThe rest ({', '.join(str(p) for p in selected)}) can still be generated."
+        else:
+            msg += "\n\nNone of the poses you asked for can be generated as-is."
+        msg += "\n\nProceed without the blocked ones, or resend?"
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+        return WAITING_ANSWERS
+
+    return await _generate_and_send_draft(update.message, context, draft, selected)
+
+
+async def proceed_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    selected = draft.pop("pending_selected_poses", [])
+    if not selected:
+        await query.message.reply_text("Nothing to generate — resend the 9 answers with different poses.")
+        return WAITING_ANSWERS
+    return await _generate_and_send_draft(query.message, context, draft, selected)
+
+
+async def cancel_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    context.chat_data.clear()
+    await query.message.reply_text("Cleared — send new photos whenever you're ready.")
+    return ConversationHandler.END
+
+
+async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, draft: dict, resolved_poses: list[int]) -> int:
     photo_word = "photo" if len(resolved_poses) == 1 else "photos"
-    await update.message.reply_text(
+    await message.reply_text(
         f"Generating {len(resolved_poses)} model {photo_word} "
         f"(poses {', '.join(str(p) for p in resolved_poses)}) — this takes "
         "a bit, I'll send them as soon as they're ready."
     )
-    if skipped_poses:
-        skip_lines = "\n".join(f"- Pose {p}: {reason}" for p, reason in skipped_poses)
-        await update.message.reply_text(f"Skipped some requested poses:\n{skip_lines}")
 
+    draft["active_task"] = asyncio.current_task()
     try:
         images, generated_poses, queued_poses = await image_gen.generate_model_images(
             draft["raw_photos"], draft["color"], draft["material"],
             draft["kurti_length"], draft["listing_type"], resolved_poses,
+            draft["categories"],
         )
         draft["generated_images"] = images
         draft["generated_poses"] = generated_poses
         draft["queued_poses"] = queued_poses
+
+        if queued_poses:
+            await message.reply_text(
+                f"(Poses {', '.join(str(p) for p in queued_poses)} are queued for "
+                "when more image generation is enabled — only "
+                f"{len(generated_poses)} generated right now to save API credits.)"
+            )
+
+        copy = await ai.generate_description(draft["color"], draft["material"], draft["listing_type"])
+        draft["title"] = copy["title"]
+        draft["description_html"] = copy["description_html"]
+        # Starts the 10-minute clock. setdefault, not assignment: this
+        # function only ever runs once per draft (the initial generation),
+        # but stays defensive against being called twice for the same draft.
+        draft.setdefault("ready_at", time.monotonic())
     except Exception:
-        logger.exception("Image generation failed")
-        await update.message.reply_text(
+        logger.exception("Image/description generation failed")
+        await message.reply_text(
             "Image generation failed — nothing was published. Send the 9 answers again to retry."
         )
         return WAITING_ANSWERS
+    finally:
+        draft.pop("active_task", None)
 
-    if queued_poses:
-        await update.message.reply_text(
-            f"(Poses {', '.join(str(p) for p in queued_poses)} are queued for "
-            "when more image generation is enabled — only "
-            f"{len(generated_poses)} generated right now to save API credits.)"
-        )
-
-    copy = await ai.generate_description(draft["color"], draft["material"], draft["listing_type"])
-    draft["title"] = copy["title"]
-    draft["description_html"] = copy["description_html"]
-
-    await _send_draft_preview(update.message, draft)
+    await _send_draft_preview(message, draft)
     return CONFIRMING
 
 
@@ -285,22 +425,23 @@ async def _send_draft_preview(message, draft: dict) -> None:
         for i, img in enumerate(draft["generated_images"])
     ]
     await message.reply_media_group(media=media)
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✅ GO LIVE", callback_data="go_live")],
-            [InlineKeyboardButton("🔁 Regenerate description", callback_data="regenerate_desc")],
-            [InlineKeyboardButton("❌ ABORT", callback_data="abort")],
-        ]
+    await message.reply_text(
+        _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"]), parse_mode="Markdown"
     )
-    await message.reply_text(_draft_caption(draft), reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def regenerate_description_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.answer("Rewriting description...")
-    draft = context.user_data["draft"]
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+    if _draft_expired(draft):
+        await _reply_expired(query, context)
+        return ConversationHandler.END
 
+    await query.answer("Rewriting description...")
     copy = await ai.generate_description(
         draft["color"], draft["material"], draft["listing_type"], regenerate=True
     )
@@ -308,24 +449,26 @@ async def regenerate_description_tap(update: Update, context: ContextTypes.DEFAU
     draft["description_html"] = copy["description_html"]
 
     await query.edit_message_reply_markup(reply_markup=None)
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✅ GO LIVE", callback_data="go_live")],
-            [InlineKeyboardButton("🔁 Regenerate description", callback_data="regenerate_desc")],
-            [InlineKeyboardButton("❌ ABORT", callback_data="abort")],
-        ]
+    await query.message.reply_text(
+        _draft_caption(draft), reply_markup=_draft_keyboard(session_id), parse_mode="Markdown"
     )
-    await query.message.reply_text(_draft_caption(draft), reply_markup=keyboard, parse_mode="Markdown")
     return CONFIRMING
 
 
 async def go_live_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+    if _draft_expired(draft):
+        await _reply_expired(query, context)
+        return ConversationHandler.END
+
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text("Publishing to Shopify...")
-
-    draft = context.user_data["draft"]
 
     try:
         image_urls = []
@@ -358,16 +501,23 @@ async def go_live_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         f"https://ramachikan.com/products/{product['handle']}",
         parse_mode="Markdown",
     )
-    context.user_data.clear()
+    context.chat_data.clear()
     return ConversationHandler.END
 
 
 async def abort_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text("Aborted — nothing was published.")
-    context.user_data.clear()
+    who = update.effective_user.full_name if update.effective_user else "someone"
+    await query.message.reply_text(f"Aborted by {who} — nothing was published.")
+    context.chat_data.clear()
     return ConversationHandler.END
 
 
@@ -378,14 +528,24 @@ def build_conversation_handler() -> ConversationHandler:
             WAITING_PHOTOS: [MessageHandler(filters.PHOTO, receive_photo)],
             WAITING_ANSWERS: [
                 MessageHandler(filters.PHOTO, photo_during_answers),
+                CallbackQueryHandler(proceed_blocked_tap, pattern="^proceed_blocked:"),
+                CallbackQueryHandler(cancel_blocked_tap, pattern="^cancel_blocked:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_answers),
             ],
             CONFIRMING: [
-                CallbackQueryHandler(go_live_tap, pattern="^go_live$"),
-                CallbackQueryHandler(regenerate_description_tap, pattern="^regenerate_desc$"),
-                CallbackQueryHandler(abort_tap, pattern="^abort$"),
+                CallbackQueryHandler(go_live_tap, pattern="^go_live:"),
+                CallbackQueryHandler(regenerate_description_tap, pattern="^regenerate_desc:"),
+                CallbackQueryHandler(abort_tap, pattern="^abort:"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=1800,
+        # per_user=False: ONE shared session per chat, not one per Telegram
+        # user. This bot runs in a group with several members — any of them
+        # must be able to see/continue/cancel the same in-progress session,
+        # and Telegram's "send anonymously" group option makes each message's
+        # effective_user a different pseudo-identity anyway, which silently
+        # breaks per-user keying even for the original sender's own /cancel.
+        # All session state lives in context.chat_data, never user_data.
+        per_user=False,
     )

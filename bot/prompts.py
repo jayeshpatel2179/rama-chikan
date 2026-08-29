@@ -206,42 +206,62 @@ def resolve_pose_selection(
 ) -> tuple[list[int], list[tuple[int, str]]]:
     """pose_request: {"mode": "specific"|"count", "pose_numbers": [...], "count": N}
 
-    Returns (ordered pose ids to actually generate, [(skipped_pose_id, reason), ...]).
-    Bottom-dependent poses (4, 6) are dropped for kurti-only listings;
-    back-dependent poses (10, 11) are dropped when no back-side raw photo
-    was supplied — never invented, per the safety rules above.
+    Returns (pose ids to generate, [(blocked_pose_id, reason), ...]).
+
+    Specific mode (owner named exact pose numbers, e.g. "1, 5, 10", or "all
+    poses" for all 11): every named pose is generated UNLESS it is a
+    genuine physical impossibility — poses 4/6 need a bottom garment that
+    doesn't exist on a kurti-only listing. Never soft-skipped here for "no
+    back reference": the owner named the pose on purpose, so we trust they
+    supplied what it needs. Anything genuinely blocked is returned, not
+    silently dropped — the caller (bot/handlers/new_product.py) surfaces it
+    to the owner and asks whether to proceed without it, rather than ever
+    silently excluding a pose the owner explicitly asked for.
+
+    Count mode (owner just gave a number, bot auto-picks from
+    DEFAULT_PRIORITY_ORDER): stays conservative, since the bot is choosing
+    blind here — both the bottom and back-reference gates apply, and an
+    ineligible pose is simply skipped in favour of the next one in priority
+    order without bothering the owner (nothing was explicitly asked for, so
+    there's nothing to confirm).
     """
 
-    def ineligible_reason(pose_id: int) -> str | None:
+    def hard_block_reason(pose_id: int) -> str | None:
         pose = POSES[pose_id]
         if pose.requires_bottom and listing_type != "kurti_pyjama_set":
-            return "listing is kurti-only, no bottom to show"
+            return "listing is kurti-only, no bottom/pyjama exists to show"
+        return None
+
+    def auto_ineligible_reason(pose_id: int) -> str | None:
+        reason = hard_block_reason(pose_id)
+        if reason:
+            return reason
+        pose = POSES[pose_id]
         if pose.requires_back_reference and not has_back_reference:
             return "no back-side raw reference photo was supplied"
         return None
 
-    selected: list[int] = []
-    skipped: list[tuple[int, str]] = []
-
     if pose_request["mode"] == "specific":
         candidates = [p for p in pose_request["pose_numbers"] if p in POSES]
+        selected: list[int] = []
+        blocked: list[tuple[int, str]] = []
         for pose_id in candidates:
-            reason = ineligible_reason(pose_id)
+            reason = hard_block_reason(pose_id)
             if reason:
-                skipped.append((pose_id, reason))
+                blocked.append((pose_id, reason))
             else:
                 selected.append(pose_id)
-    else:
-        count = max(1, pose_request["count"])
-        for pose_id in DEFAULT_PRIORITY_ORDER:
-            if len(selected) >= count:
-                break
-            reason = ineligible_reason(pose_id)
-            if reason:
-                continue  # not a real "skip" — just not chosen for auto-select
-            selected.append(pose_id)
+        return selected, blocked
 
-    return selected, skipped
+    count = max(1, pose_request["count"])
+    selected = []
+    for pose_id in DEFAULT_PRIORITY_ORDER:
+        if len(selected) >= count:
+            break
+        if auto_ineligible_reason(pose_id):
+            continue
+        selected.append(pose_id)
+    return selected, []
 
 
 # --- Section C: micro-variation library -------------------------------------
@@ -335,6 +355,65 @@ def pick_variation(used_combos: set) -> dict:
     }
 
 
+# --- Model age, mapped from the Question 5 category answer ------------------
+# The ONLY thing category changes about generation — poses, backgrounds,
+# micro-variation, modesty/garment-accuracy rules, output spec, and the
+# within-product identity lock (face/hair-style/jewelry/footwear) all stay
+# exactly as already specified. This is one variable (MODEL_AGE) swapped
+# into the same prompt template.
+
+MODEL_AGE_DESCRIPTIONS = {
+    "me": (
+        "Adult Indian woman aged 24-30, youthful and contemporary, "
+        "medium-fair complexion, natural minimal makeup."
+    ),
+    "mom": (
+        "Adult Indian woman aged 35-45, mature, elegant, and poised, "
+        "medium-fair complexion, natural minimal makeup."
+    ),
+    "me_mom": (
+        "Adult Indian woman aged 28-32 — an age that reads plausibly for "
+        "both a young adult and a mother, medium-fair complexion, natural "
+        "minimal makeup."
+    ),
+    "all_three": (
+        "Adult Indian woman aged 30-35, medium-fair complexion, natural "
+        "minimal makeup."
+    ),
+    "nani": (
+        "Adult Indian woman aged 50-60. A graceful, dignified older Indian "
+        "grandmother — naturally greying or silver hair (typically in a "
+        "neat low bun or pulled back), soft natural lines on the face, "
+        "warm gentle expression, traditional understated jewellery. She "
+        "must read as a real, respected Indian grandmother, not a young "
+        "model with grey hair painted on. Tone is warm and respectful: "
+        "dignified, elegant, well-presented — never frail, never comedic, "
+        "never a caricature."
+    ),
+}
+
+
+def resolve_model_age_bucket(categories: list[str]) -> str:
+    """Question 5's category answer -> MODEL_AGE bucket.
+
+    "All three" is a deliberate special case that overrides the general
+    "Nani wins" rule below it — per the owner's spec, "For Nani" alongside
+    exactly one other category still generates the Nani version (that's the
+    audience most needing representation), but naming all three together
+    is its own distinct blended age instead.
+    """
+    cats = {c.strip().lower() for c in categories}
+    if {"for nani", "for mom", "for me"} <= cats:
+        return "all_three"
+    if "for nani" in cats:
+        return "nani"
+    if "for mom" in cats and "for me" in cats:
+        return "me_mom"
+    if "for mom" in cats:
+        return "mom"
+    return "me"
+
+
 # --- Section B: listing-type rule (the fix for the "without pyjama"
 # hallucination, carried forward from v1) ------------------------------------
 
@@ -412,6 +491,7 @@ def build_pose_prompt(
     product_identity: dict,
     variation: dict,
     has_face_reference: bool,
+    model_age: str,
 ) -> str:
     pose = POSES[pose_id]
 
@@ -433,9 +513,8 @@ def build_pose_prompt(
     )
 
     model_identity = (
-        "Adult Indian woman in her mid-20s, medium-fair complexion, "
-        f"natural minimal makeup, hair styled {product_identity['hair']}, "
-        f"wearing {product_identity['earrings']} and "
+        f"{MODEL_AGE_DESCRIPTIONS[model_age]} Hair styled "
+        f"{product_identity['hair']}, wearing {product_identity['earrings']} and "
         f"{product_identity['bracelet']}, and {product_identity['footwear']}. "
         "Calm, composed, professional catalogue expression as a baseline "
         "(see gesture below for this specific image)."

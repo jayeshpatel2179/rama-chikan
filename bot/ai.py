@@ -172,10 +172,11 @@ async def parse_new_product_answers(text: str) -> dict:
         "For the 9th question (pose request): if the reply lists specific pose "
         "numbers (e.g. '1, 5, 3' or '1 5 3' or 'poses 2 and 7'), set mode to "
         "'specific' and pose_numbers to that list of integers (count can be 0). "
-        "If the reply is just a single number with no list context (e.g. '4' "
-        "meaning 'give me 4 images'), set mode to 'count' and count to that "
-        "integer (pose_numbers can be empty). Pose numbers are always between "
-        "1 and 11.\n\n"
+        "If the reply says 'all poses' (meaning all 11), set mode to 'specific' "
+        "and pose_numbers to [1,2,3,4,5,6,7,8,9,10,11]. If the reply is just a "
+        "single number with no list context (e.g. '4' meaning 'give me 4 "
+        "images'), set mode to 'count' and count to that integer (pose_numbers "
+        "can be empty). Pose numbers are always between 1 and 11.\n\n"
         "Reply:\n" + text
     )
     response = await _client.chat.completions.create(

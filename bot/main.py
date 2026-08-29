@@ -2,14 +2,14 @@ import logging
 import warnings
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
 
 from bot.config import LOG_LEVEL, TELEGRAM_BOT_TOKEN
 from bot.handlers.cancel import cancel_idle
 from bot.handlers.new_product import build_conversation_handler as build_new_product_handler
 from bot.handlers.out_of_stock import build_conversation_handler as build_out_of_stock_handler
-from bot.handlers.start import help_command, start
+from bot.handlers.start import help_command, start, unrecognized_text
 
 # Both conversation flows intentionally mix message handlers (photos/text)
 # and callback-query handlers (button taps) in the same ConversationHandler
@@ -63,6 +63,13 @@ def build_application() -> Application:
     # conversation's own /cancel fallback takes it first; this one only
     # fires when nothing is active.
     application.add_handler(CommandHandler("cancel", cancel_idle))
+    # group=1: only reached when nothing in group 0 (the commands and both
+    # ConversationHandlers above) claimed the update — i.e. no session is
+    # active for this chat and the text wasn't a recognized product
+    # slug/URL either. Catches plain unrecognized text like "hi".
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, unrecognized_text), group=1
+    )
     application.add_error_handler(_error_handler)
 
     return application

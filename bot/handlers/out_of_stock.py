@@ -50,7 +50,7 @@ async def receive_product_ref(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return WAITING_PRODUCT
 
-    context.user_data["oos_product"] = product
+    context.chat_data["oos_product"] = product
     return await _send_action_menu(update.message, product)
 
 
@@ -77,7 +77,7 @@ async def action_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.message.reply_text("No problem — send the correct product slug or URL.")
         return WAITING_PRODUCT
 
-    product = context.user_data["oos_product"]
+    product = context.chat_data["oos_product"]
 
     if query.data == "action_delete":
         keyboard = InlineKeyboardMarkup(
@@ -116,7 +116,7 @@ async def delete_confirm_tap(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
 
-    product = context.user_data["oos_product"]
+    product = context.chat_data["oos_product"]
 
     if query.data == "delete_no":
         return await _send_action_menu(query.message, product)
@@ -133,13 +133,13 @@ async def delete_confirm_tap(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(
         f"🗑️ Deleted *{product['title']}* from the store.", parse_mode="Markdown"
     )
-    context.user_data.pop("oos_product", None)
+    context.chat_data.pop("oos_product", None)
     return ConversationHandler.END
 
 
 async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip().lower()
-    product = context.user_data["oos_product"]
+    product = context.chat_data["oos_product"]
     variants = product["variants"]["nodes"]
 
     if "whole product" in text or "whole thing" in text or "entire product" in text:
@@ -192,7 +192,7 @@ async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TY
         f"✅ Marked out of stock on *{product['title']}*: {', '.join(changed_sizes)}",
         parse_mode="Markdown",
     )
-    context.user_data.pop("oos_product", None)
+    context.chat_data.pop("oos_product", None)
     return ConversationHandler.END
 
 
@@ -211,4 +211,8 @@ def build_conversation_handler() -> ConversationHandler:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=900,
+        # per_user=False: same reasoning as new_product.py's ConversationHandler
+        # — one shared session per chat, not per Telegram user, and state
+        # lives in context.chat_data. See that file's comment for why.
+        per_user=False,
     )
