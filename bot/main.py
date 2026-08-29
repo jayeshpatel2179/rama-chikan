@@ -78,7 +78,14 @@ def build_application() -> Application:
 def main() -> None:
     application = build_application()
     logger.info("Starting Rama Chikan agent (polling)...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # drop_pending_updates: on a Railway redeploy, the new container can
+    # start polling a moment before the old one has fully released its own
+    # getUpdates connection (Telegram allows only one at a time — the
+    # "Conflict: terminated by other getUpdates request" in the logs during
+    # that handoff, harmless and self-resolving as PTB's retry loop keeps
+    # trying). This just makes sure that once reconnected, the bot doesn't
+    # replay a backlog of messages that piled up during that gap.
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
