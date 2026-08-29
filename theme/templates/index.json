@@ -12,32 +12,6 @@
     "hero_jVaWmY": {
       "type": "hero",
       "blocks": {
-        "text_YLPk4p": {
-          "type": "text",
-          "name": "t:names.heading",
-          "settings": {
-            "text": "<p>Handcrafted Lucknowi Chikankari \u2014 for you, and for the ones you love</p>",
-            "width": "fit-content",
-            "max_width": "normal",
-            "alignment": "left",
-            "type_preset": "h2",
-            "font": "var(--font-body--family)",
-            "font_size": "1rem",
-            "line_height": "normal",
-            "letter_spacing": "normal",
-            "case": "none",
-            "wrap": "pretty",
-            "text_color": "{{ settings.color_palette.background }}",
-            "background": false,
-            "background_color": "#00000026",
-            "corner_radius": 0,
-            "padding-block-start": 0,
-            "padding-block-end": 0,
-            "padding-inline-start": 0,
-            "padding-inline-end": 0
-          },
-          "blocks": {}
-        },
         "button_H9gpTf": {
           "type": "button",
           "name": "t:names.button",
@@ -58,7 +32,6 @@
         }
       },
       "block_order": [
-        "text_YLPk4p",
         "button_H9gpTf"
       ],
       "name": "t:names.hero",
@@ -125,7 +98,7 @@
         "trust_2": {
           "type": "text",
           "settings": {
-            "text": "<p>Free Shipping Over \u20b9999</p>",
+            "text": "<p>Free Shipping Over ₹999</p>",
             "type_preset": "paragraph",
             "font": "var(--font-accent--family)",
             "font_size": "0.9rem",
@@ -588,7 +561,7 @@
                 "text": {
                   "type": "text",
                   "settings": {
-                    "text": "<p>Every Rama Chikan piece begins on a bare cotton canvas in Lucknow, where artisans hand-embroider each motif thread by thread \u2014 a tradition passed down for generations. No two pieces are ever quite the same.</p>",
+                    "text": "<p>Every Rama Chikan piece begins on a bare cotton canvas in Lucknow, where artisans hand-embroider each motif thread by thread — a tradition passed down for generations. No two pieces are ever quite the same.</p>",
                     "max_width": "narrow",
                     "type_preset": "rte"
                   }
@@ -843,346 +816,6 @@
         "padding-block-end": 8
       }
     },
-    "why_us_carousel": {
-      "type": "carousel",
-      "blocks": {
-        "static-header": {
-          "type": "group",
-          "name": "t:names.header",
-          "static": true,
-          "settings": {
-            "content_direction": "column",
-            "vertical_on_mobile": true,
-            "horizontal_alignment": "center",
-            "vertical_alignment": "center",
-            "horizontal_alignment_flex_direction_column": "center",
-            "vertical_alignment_flex_direction_column": "center",
-            "gap": 8,
-            "width": "fill",
-            "custom_width": 100,
-            "width_mobile": "fill",
-            "custom_width_mobile": 100,
-            "height": "fit",
-            "custom_height": 100,
-            "background_media": "none",
-            "video_position": "cover",
-            "background_image_position": "cover",
-            "border": "none",
-            "border_width": 1,
-            "border_opacity": 100,
-            "border_radius": 0,
-            "padding-block-start": 0,
-            "padding-block-end": 24,
-            "padding-inline-start": 0,
-            "padding-inline-end": 0
-          },
-          "blocks": {
-            "why_us_heading": {
-              "type": "text",
-              "settings": {
-                "text": "<h2>Why Rama Chikan</h2>",
-                "alignment": "center",
-                "type_preset": "h2"
-              }
-            }
-          },
-          "block_order": [
-            "why_us_heading"
-          ]
-        },
-        "static-carousel-content": {
-          "type": "_carousel-content",
-          "static": true,
-          "settings": {
-            "height": "fit",
-            "contained": true,
-            "border": "none"
-          },
-          "blocks": {
-            "card_1": {
-              "type": "_card",
-              "settings": {
-                "content_direction": "column",
-                "horizontal_alignment": "center",
-                "vertical_alignment": "center",
-                "gap": 10,
-                "background_color": "{{ settings.color_palette.color2 }}",
-                "aspect_ratio": "auto",
-                "padding-block-start": 24,
-                "padding-block-end": 24,
-                "padding-inline-start": 24,
-                "padding-inline-end": 24
-              },
-              "blocks": {
-                "card_1_title": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>\ud83e\udea1 Hand-Embroidered</p>",
-                    "alignment": "center",
-                    "type_preset": "h5"
-                  }
-                },
-                "card_1_text": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>Every motif is stitched by hand \u2014 no machine embroidery, ever.</p>",
-                    "alignment": "center",
-                    "type_preset": "paragraph"
-                  }
-                }
-              },
-              "block_order": [
-                "card_1_title",
-                "card_1_text"
-              ]
-            },
-            "card_2": {
-              "type": "_card",
-              "settings": {
-                "content_direction": "column",
-                "horizontal_alignment": "center",
-                "vertical_alignment": "center",
-                "gap": 10,
-                "background_color": "{{ settings.color_palette.color2 }}",
-                "aspect_ratio": "auto",
-                "padding-block-start": 24,
-                "padding-block-end": 24,
-                "padding-inline-start": 24,
-                "padding-inline-end": 24
-              },
-              "blocks": {
-                "card_2_title": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>\ud83d\udccd Direct From Lucknow</p>",
-                    "alignment": "center",
-                    "type_preset": "h5"
-                  }
-                },
-                "card_2_text": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>Sourced straight from the artisans who keep this craft alive.</p>",
-                    "alignment": "center",
-                    "type_preset": "paragraph"
-                  }
-                }
-              },
-              "block_order": [
-                "card_2_title",
-                "card_2_text"
-              ]
-            },
-            "card_3": {
-              "type": "_card",
-              "settings": {
-                "content_direction": "column",
-                "horizontal_alignment": "center",
-                "vertical_alignment": "center",
-                "gap": 10,
-                "background_color": "{{ settings.color_palette.color2 }}",
-                "aspect_ratio": "auto",
-                "padding-block-start": 24,
-                "padding-block-end": 24,
-                "padding-inline-start": 24,
-                "padding-inline-end": 24
-              },
-              "blocks": {
-                "card_3_title": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>\u2705 Quality Checked</p>",
-                    "alignment": "center",
-                    "type_preset": "h5"
-                  }
-                },
-                "card_3_text": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>Every piece is inspected before it's listed \u2014 stitching, fit, and fabric.</p>",
-                    "alignment": "center",
-                    "type_preset": "paragraph"
-                  }
-                }
-              },
-              "block_order": [
-                "card_3_title",
-                "card_3_text"
-              ]
-            },
-            "card_4": {
-              "type": "_card",
-              "settings": {
-                "content_direction": "column",
-                "horizontal_alignment": "center",
-                "vertical_alignment": "center",
-                "gap": 10,
-                "background_color": "{{ settings.color_palette.color2 }}",
-                "aspect_ratio": "auto",
-                "padding-block-start": 24,
-                "padding-block-end": 24,
-                "padding-inline-start": 24,
-                "padding-inline-end": 24
-              },
-              "blocks": {
-                "card_4_title": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>\u21a9 Easy Returns</p>",
-                    "alignment": "center",
-                    "type_preset": "h5"
-                  }
-                },
-                "card_4_text": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>Not quite right? Send it back within 7 days, no questions asked.</p>",
-                    "alignment": "center",
-                    "type_preset": "paragraph"
-                  }
-                }
-              },
-              "block_order": [
-                "card_4_title",
-                "card_4_text"
-              ]
-            },
-            "card_5": {
-              "type": "_card",
-              "settings": {
-                "content_direction": "column",
-                "horizontal_alignment": "center",
-                "vertical_alignment": "center",
-                "gap": 10,
-                "background_color": "{{ settings.color_palette.color2 }}",
-                "aspect_ratio": "auto",
-                "padding-block-start": 24,
-                "padding-block-end": 24,
-                "padding-inline-start": 24,
-                "padding-inline-end": 24
-              },
-              "blocks": {
-                "card_5_title": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>\ud83c\udf81 Gift-Ready Packaging</p>",
-                    "alignment": "center",
-                    "type_preset": "h5"
-                  }
-                },
-                "card_5_text": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>Every order arrives beautifully packaged, ready to gift.</p>",
-                    "alignment": "center",
-                    "type_preset": "paragraph"
-                  }
-                }
-              },
-              "block_order": [
-                "card_5_title",
-                "card_5_text"
-              ]
-            },
-            "card_6": {
-              "type": "_card",
-              "settings": {
-                "content_direction": "column",
-                "horizontal_alignment": "center",
-                "vertical_alignment": "center",
-                "gap": 10,
-                "background_color": "{{ settings.color_palette.color2 }}",
-                "aspect_ratio": "auto",
-                "padding-block-start": 24,
-                "padding-block-end": 24,
-                "padding-inline-start": 24,
-                "padding-inline-end": 24
-              },
-              "blocks": {
-                "card_6_title": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>\ud83d\ude9a Pan-India Delivery</p>",
-                    "alignment": "center",
-                    "type_preset": "h5"
-                  }
-                },
-                "card_6_text": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>We ship to every corner of India, right to your doorstep.</p>",
-                    "alignment": "center",
-                    "type_preset": "paragraph"
-                  }
-                }
-              },
-              "block_order": [
-                "card_6_title",
-                "card_6_text"
-              ]
-            },
-            "card_7": {
-              "type": "_card",
-              "settings": {
-                "content_direction": "column",
-                "horizontal_alignment": "center",
-                "vertical_alignment": "center",
-                "gap": 10,
-                "background_color": "{{ settings.color_palette.color2 }}",
-                "aspect_ratio": "auto",
-                "padding-block-start": 24,
-                "padding-block-end": 24,
-                "padding-inline-start": 24,
-                "padding-inline-end": 24
-              },
-              "blocks": {
-                "card_7_title": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>\ud83d\udc75 Three Generations, One Craft</p>",
-                    "alignment": "center",
-                    "type_preset": "h5"
-                  }
-                },
-                "card_7_text": {
-                  "type": "text",
-                  "settings": {
-                    "text": "<p>From Nani to Mom to you \u2014 chikankari made for every generation of your family.</p>",
-                    "alignment": "center",
-                    "type_preset": "paragraph"
-                  }
-                }
-              },
-              "block_order": [
-                "card_7_title",
-                "card_7_text"
-              ]
-            }
-          },
-          "block_order": [
-            "card_1",
-            "card_2",
-            "card_3",
-            "card_4",
-            "card_5",
-            "card_6",
-            "card_7"
-          ]
-        }
-      },
-      "name": "t:names.carousel",
-      "settings": {
-        "columns": 4,
-        "mobile_columns": "2",
-        "section_width": "page-width",
-        "columns_gap": 16,
-        "background_color": "{{ settings.color_palette.background }}",
-        "icons_style": "arrow",
-        "icons_shape": "circle",
-        "padding-block-start": 48,
-        "padding-block-end": 56
-      }
-    },
     "product_list_fa6P9H": {
       "type": "product-list",
       "blocks": {
@@ -1382,7 +1015,6 @@
     "divider_3",
     "new_arrivals_carousel",
     "divider_4",
-    "why_us_carousel",
     "product_list_fa6P9H"
   ]
 }
