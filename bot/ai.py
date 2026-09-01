@@ -47,6 +47,82 @@ async def detect_color(photo_bytes_list: list[bytes]) -> str:
     )
     return json.loads(response.choices[0].message.content)["dominant_color"]
 
+
+_BACK_REFERENCE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "back_reference_description",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "has_yoke_panel": {"type": "boolean"},
+                "motif_count_description": {"type": "string"},
+                "motif_placement": {"type": "string"},
+                "embroidery_locations": {"type": "string"},
+                "overall_description": {"type": "string"},
+            },
+            "required": [
+                "has_yoke_panel", "motif_count_description", "motif_placement",
+                "embroidery_locations", "overall_description",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def describe_back_reference(back_photo_bytes: bytes) -> str:
+    """Vision-describes ONLY what's actually visible on the raw back photo,
+    as literal text for injection into the back-view generation prompt
+    alongside the image itself.
+
+    Added because the image reference alone was not enough to stop the
+    image model inventing a yoke/motif column on back views that don't
+    have one (it was picking up the FRONT's motif density instead) — see
+    bot/prompts.py's back-view fidelity block, which is where this text
+    gets used. Chikankari kurti backs are usually much plainer than the
+    front, and that's the correct, expected answer here — this function
+    must not nudge the model toward assuming otherwise."""
+    b64 = base64.b64encode(back_photo_bytes).decode("ascii")
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "This is the RAW back-of-garment reference photo for a chikankari "
+                "kurti. Describe ONLY what is actually visible on the back — do "
+                "not describe the front, do not assume anything typical of "
+                "chikankari kurtis in general, and do not guess. Answer "
+                "factually: is there a horizontal yoke seam/panel across the "
+                "upper back? How many embroidery motifs are on the main body of "
+                "the back, and exactly where are they placed? Where does "
+                "embroidery actually sit (e.g. sleeve cuffs, shoulder/neck edge, "
+                "centre back, hem)? Chikankari kurti backs are often much "
+                "plainer than the front — report exactly what you see; plain "
+                "or near-plain is a valid and expected answer, not a mistake."
+            ),
+        },
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+    ]
+    response = await _client.chat.completions.create(
+        model=_VISION_MODEL,
+        messages=[{"role": "user", "content": content}],
+        response_format=_BACK_REFERENCE_SCHEMA,
+    )
+    data = json.loads(response.choices[0].message.content)
+    yoke_line = (
+        "There IS a horizontal yoke seam/panel across the upper back."
+        if data["has_yoke_panel"]
+        else "There is NO yoke seam or yoke panel of any kind across the upper "
+        "back — the back fabric is continuous with no horizontal seam line there."
+    )
+    return (
+        f"{yoke_line} Motifs on the back body: {data['motif_count_description']}, "
+        f"placed at: {data['motif_placement']}. Embroidery actually appears at: "
+        f"{data['embroidery_locations']}. Overall: {data['overall_description']}"
+    )
+
+
 _PRODUCT_COPY_SCHEMA = {
     "type": "json_schema",
     "json_schema": {

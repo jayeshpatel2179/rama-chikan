@@ -31,15 +31,17 @@ WAITING_PHOTOS, WAITING_ANSWERS, CONFIRMING = range(3)
 # not by how many raw photos went in.
 MAX_RAW_PHOTOS = 6
 
-# There's no per-photo angle tagging in the intake flow — the owner just
-# sends 1-6 undifferentiated raw photos. Poses 10/11 (back view) normally
-# need a back-side reference (bot/prompts.py POSES), and this codebase has
-# no reliable way to know if one of the raw photos is actually the back.
-# Hardcoded False rather than guessed, per the "never invent" safety rule.
-# NOTE: this only gates the bot's own AUTO pose picks (Question 9 answered
-# with just a count) — when the owner explicitly names pose numbers,
-# resolve_pose_selection() trusts them and does not apply this gate at all.
-_HAS_BACK_REFERENCE = False
+# Front/back tagging: the normal case (per the owner's actual workflow) is
+# exactly 2 raw photos, sent front then back. When that's what comes in,
+# _finish_photos tags photo 1 as FRONT and photo 2 as BACK (draft["front_photo"]
+# / draft["back_photo"]) and tells the owner which is which, with a Swap
+# button in case the order was backwards — see swap_front_back_tap. Poses
+# 10/11 (back view) then use ONLY the back photo as their garment reference
+# (bot/image_gen.py), never blended with the front. When the raw-photo count
+# isn't exactly 2 (just 1, or more than 2 undifferentiated angle shots),
+# front_photo/back_photo stay None and generation falls back to the old
+# undifferentiated pool for whichever side is ambiguous — this only reliably
+# fixes the standard front+back submission, which is the reported case.
 
 # Short menu labels for the chat — distinct from POSES[n].label (which is
 # the fuller name used in the mega prompt) so the intake message stays scannable.
@@ -100,6 +102,15 @@ def _new_session_id() -> str:
 def _draft_expired(draft: dict) -> bool:
     ready_at = draft.get("ready_at")
     return ready_at is not None and (time.monotonic() - ready_at) > DRAFT_TTL_SECONDS
+
+
+def _front_back_swap_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(
+            "🔄 Swap — photo 1 was actually the BACK",
+            callback_data=f"swap_front_back:{session_id}",
+        )]]
+    )
 
 
 def _draft_keyboard(session_id: str) -> InlineKeyboardMarkup:
@@ -169,15 +180,41 @@ async def _finish_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if draft is None:
         return ConversationHandler.END
     message = update.effective_message
-    count = len(draft["raw_photos"])
+    raw_photos = draft["raw_photos"]
+    count = len(raw_photos)
 
     await message.reply_text(
         f"Received {count} photo(s) — that's all the photos. Looking at them now..."
     )
-    draft["color"] = await ai.detect_color(draft["raw_photos"])
+
+    if count == 2:
+        draft["front_photo"], draft["back_photo"] = raw_photos[0], raw_photos[1]
+        await message.reply_text(
+            "Treating photo 1 as FRONT and photo 2 as BACK for pose generation.",
+            reply_markup=_front_back_swap_keyboard(draft["session_id"]),
+        )
+    else:
+        draft["front_photo"] = None
+        draft["back_photo"] = None
+
+    draft["color"] = await ai.detect_color(raw_photos)
     draft.pop("active_task", None)
 
     await message.reply_text(_QUESTIONS_MESSAGE)
+    return WAITING_ANSWERS
+
+
+async def swap_front_back_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
+    draft["front_photo"], draft["back_photo"] = draft.get("back_photo"), draft.get("front_photo")
+    await query.answer("Swapped.")
+    await query.edit_message_text("Swapped — photo 1 is now BACK, photo 2 is now FRONT.")
     return WAITING_ANSWERS
 
 
@@ -247,7 +284,7 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
     selected, blocked = prompts.resolve_pose_selection(
-        parsed["pose_request"], draft["listing_type"], _HAS_BACK_REFERENCE
+        parsed["pose_request"], draft["listing_type"], bool(draft.get("back_photo"))
     )
     if not selected and not blocked:
         await update.message.reply_text(
@@ -329,7 +366,8 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
     draft["active_task"] = asyncio.current_task()
     try:
         images, generated_poses, queued_poses = await image_gen.generate_model_images(
-            draft["raw_photos"], draft["color"], draft["material"],
+            draft["raw_photos"], draft.get("front_photo"), draft.get("back_photo"),
+            draft["color"], draft["material"],
             draft["kurti_length"], draft["listing_type"], resolved_poses,
             draft["categories"],
         )
@@ -530,6 +568,7 @@ def build_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.PHOTO, photo_during_answers),
                 CallbackQueryHandler(proceed_blocked_tap, pattern="^proceed_blocked:"),
                 CallbackQueryHandler(cancel_blocked_tap, pattern="^cancel_blocked:"),
+                CallbackQueryHandler(swap_front_back_tap, pattern="^swap_front_back:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_answers),
             ],
             CONFIRMING: [

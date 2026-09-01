@@ -44,6 +44,36 @@ NEGATIVE_PROMPT = (
     "watermark, logo"
 )
 
+# Appended to NEGATIVE_PROMPT only for back-view poses (10/11) — added after
+# a real regression where the model took the FRONT's yoke/motif treatment
+# and applied it to the back instead of reproducing the actual back
+# reference. See BACK_VIEW_FIDELITY below, which is the paired positive-side
+# instruction for the same fix.
+BACK_VIEW_NEGATIVE_ADDITIONS = (
+    "invented yoke, added seam line, mirrored front embroidery, added "
+    "centre-back motifs, added sleeve motifs, embellished back"
+)
+
+# Inserted into the prompt only for back-view poses. {back_reference_description}
+# is filled with a literal, per-product vision description of the actual back
+# reference photo (bot.ai.describe_back_reference) — the image reference alone
+# was not enough to stop the model inventing back detail that isn't there, so
+# the constraint is also stated in words, grounded in what that photo actually shows.
+BACK_VIEW_FIDELITY = """\
+BACK VIEW FIDELITY — this overrides any general assumption about what a \
+chikankari kurti back "usually" looks like: reproduce the back of the \
+garment EXACTLY as it appears in the back reference photo, and nowhere \
+else. Do not add a yoke panel, seam line, motif column, or any embroidery \
+that is not visible in the back reference photo. If the back reference \
+shows a plain or lightly embroidered back, render it plain or lightly \
+embroidered — plain is the correct answer there, not a mistake to \
+"improve" on. Do not carry over the front garment's motif density, motif \
+placement, or neckline/yoke treatment onto the back. Copy only what the \
+back reference photo actually shows.
+
+FACTUAL DESCRIPTION OF THE BACK REFERENCE PHOTO (verified separately from \
+the image itself — treat this as ground truth): {back_reference_description}"""
+
 GARMENT_CLEANUP = (
     "The raw reference photos are unironed, wrinkled, casually laid-out "
     "phone shots — render the garment as freshly pressed, crisp, and "
@@ -176,8 +206,10 @@ POSES: dict[int, Pose] = {
     10: Pose(
         10, "Full-Length Back View, Straight",
         "Model faces fully away from camera, standing straight, full body "
-        "head to feet. Shows back yoke embroidery, back hem, back of the "
-        "bottom, and heels of the juttis.",
+        "head to feet. Shows the back of the garment exactly as the back "
+        "reference photo shows it — including back hem, back of the "
+        "bottom, and heels of the juttis — with no yoke panel, seam line, "
+        "or embroidery added beyond what the back reference actually shows.",
         "full_length",
         requires_back_reference=True,
     ),
@@ -186,7 +218,9 @@ POSES: dict[int, Pose] = {
         "Cropped from above the head to roughly hip level. Model's back "
         "is toward the camera, body angled slightly, head turned in soft "
         "profile looking down over the shoulder with a faint smile. Shows "
-        "back embroidery motif and sleeve detail with a warmer, more "
+        "whatever embroidery motif and sleeve detail the back reference "
+        "photo actually has — which may be minimal or plain, do not "
+        "invent embroidery beyond what it shows — with a warmer, more "
         "human feel than pose 10.",
         "waist_up",
         requires_back_reference=True,
@@ -480,7 +514,7 @@ GARMENT PRESENTATION: {cleanup_rule}
 FIDELITY: Do not invent, guess, or mirror any part of the garment that is \
 not visible in the reference photos — render only what is actually shown \
 there.
-
+{back_fidelity_block}
 DO NOT INCLUDE ANY OF: {negative_prompt}
 
 OUTPUT: {output_spec}
@@ -499,8 +533,19 @@ def build_pose_prompt(
     variation: dict,
     has_face_reference: bool,
     model_age: str,
+    back_reference_description: str | None = None,
 ) -> str:
     pose = POSES[pose_id]
+
+    negative_prompt = NEGATIVE_PROMPT
+    back_fidelity_block = ""
+    if pose.requires_back_reference:
+        negative_prompt = f"{NEGATIVE_PROMPT}, {BACK_VIEW_NEGATIVE_ADDITIONS}"
+        back_fidelity_block = "\n" + BACK_VIEW_FIDELITY.format(
+            back_reference_description=back_reference_description
+            or "(no separate description available — rely on the back "
+            "reference image alone, and still follow every rule above.)"
+        ) + "\n"
 
     length_rule = (
         "The kurti is SHORT length (hip to mid-thigh) — render the "
@@ -546,6 +591,7 @@ def build_pose_prompt(
         background=BACKGROUND_PRESETS[background_preset],
         lighting=LIGHTING,
         cleanup_rule=GARMENT_CLEANUP,
-        negative_prompt=NEGATIVE_PROMPT,
+        back_fidelity_block=back_fidelity_block,
+        negative_prompt=negative_prompt,
         output_spec=OUTPUT_SPEC,
     )
