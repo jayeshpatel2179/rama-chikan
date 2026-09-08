@@ -1,7 +1,7 @@
 """Master image-generation prompt system ("mega prompt") v2 for on-model
 product photos, rebuilt 2026-08-27 around a permanent, numbered 11-pose
 library (replacing the earlier 9-pose/7-slot system). The shop owner picks
-poses by number at intake time (Question 9) instead of the agent deciding a
+poses by number at intake time (Question 11) instead of the agent deciding a
 fixed slot structure — see resolve_pose_selection() below.
 
 Reference photos for these 11 poses live in references/poses/, named
@@ -13,7 +13,7 @@ passed into the image model as generation references (see bot/image_gen.py).
 TEMPORARY DEV-PHASE NOTE: bot/config.py's IMAGE_GENERATION_CAP = 1 means
 only the FIRST pose the owner selected (or the top of the default priority
 order) actually generates right now, to limit API credit burn while
-testing. Question 9 is still asked and the full selection is still stored
+testing. Question 11 is still asked and the full selection is still stored
 and resolved — raising the cap later is a one-line config change, not a
 rewrite.
 """
@@ -73,6 +73,45 @@ back reference photo actually shows.
 
 FACTUAL DESCRIPTION OF THE BACK REFERENCE PHOTO (verified separately from \
 the image itself — treat this as ground truth): {back_reference_description}"""
+
+def embroidery_color_note(thread_color: str, thread_color_name: str) -> str:
+    """Built from Question 9's answer (bot.ai.parse_new_product_answers).
+    Added after a real hallucination: tonal (self-coloured) embroidery kept
+    rendering as white/silver because the raw photo alone gave the model no
+    strong colour signal to anchor to — this states the real thread colour
+    as an explicit constraint instead of leaving it to guesswork, for every
+    pose, not just back views (the front rendered tonal purple as white too)."""
+    if thread_color == "tonal":
+        return (
+            "EMBROIDERY THREAD COLOUR: the embroidery is the SAME colour as "
+            "the base fabric (tonal/self-coloured) — visible only through "
+            "subtle texture and shading, not through contrast. Do NOT "
+            "render it in white, cream, silver, or any colour that "
+            "contrasts with the fabric. The motifs must read as barely "
+            "visible tonal relief, exactly like the raw reference photos — "
+            "never as bold, high-contrast embroidery."
+        )
+    if thread_color == "white_or_cream":
+        return (
+            "EMBROIDERY THREAD COLOUR: white or cream thread, clearly "
+            "contrasting against the base fabric colour, as shown in the "
+            "raw reference photos."
+        )
+    name = thread_color_name or "a colour distinct from the base fabric"
+    return (
+        f"EMBROIDERY THREAD COLOUR: {name}, as shown in the raw reference "
+        "photos — do not substitute white, cream, or any other colour."
+    )
+
+
+# Extra negative-prompt terms for a declared-tonal garment — paired with
+# embroidery_color_note above. Without this, "avoid inventing detail" alone
+# wasn't enough to stop the model defaulting to its high-contrast chikankari
+# prior.
+TONAL_NEGATIVE_ADDITIONS = (
+    "white embroidery, cream thread, silver thread, contrasting thread "
+    "colour, high-contrast motifs"
+)
 
 GARMENT_CLEANUP = (
     "The raw reference photos are unironed, wrinkled, casually laid-out "
@@ -511,6 +550,8 @@ LIGHTING: {lighting}
 
 GARMENT PRESENTATION: {cleanup_rule}
 
+{embroidery_color_note}
+
 FIDELITY: Do not invent, guess, or mirror any part of the garment that is \
 not visible in the reference photos — render only what is actually shown \
 there.
@@ -534,18 +575,49 @@ def build_pose_prompt(
     has_face_reference: bool,
     model_age: str,
     back_reference_description: str | None = None,
+    embroidery_thread_color: str = "white_or_cream",
+    embroidery_thread_color_name: str = "",
+    back_style: str = "not_specified",
 ) -> str:
     pose = POSES[pose_id]
 
     negative_prompt = NEGATIVE_PROMPT
+    if embroidery_thread_color == "tonal":
+        negative_prompt = f"{negative_prompt}, {TONAL_NEGATIVE_ADDITIONS}"
+
     back_fidelity_block = ""
     if pose.requires_back_reference:
-        negative_prompt = f"{NEGATIVE_PROMPT}, {BACK_VIEW_NEGATIVE_ADDITIONS}"
-        back_fidelity_block = "\n" + BACK_VIEW_FIDELITY.format(
-            back_reference_description=back_reference_description
-            or "(no separate description available — rely on the back "
-            "reference image alone, and still follow every rule above.)"
-        ) + "\n"
+        negative_prompt = f"{negative_prompt}, {BACK_VIEW_NEGATIVE_ADDITIONS}"
+        # The owner's own Question 10 answer is treated as authoritative,
+        # layered on top of (not instead of) the vision-verified
+        # back_reference_description below — a backstop for exactly the
+        # case that caused the original bug: tonal/low-contrast photos are
+        # also the ones the vision description pass is most likely to
+        # misread.
+        back_owner_override = ""
+        if back_style == "plain_or_same_as_front":
+            back_owner_override = (
+                "\nSHOP OWNER CONFIRMATION (authoritative): the back is "
+                "plain, with no yoke panel or neck embroidery — the same "
+                "scattered motifs as the front, nothing added."
+            )
+        elif back_style == "has_yoke_or_neck_embroidery":
+            back_owner_override = (
+                "\nSHOP OWNER CONFIRMATION (authoritative): the back DOES "
+                "have a yoke panel or neck embroidery — reproduce it as "
+                "described below and in the back reference photo; do not "
+                "remove or flatten it."
+            )
+        back_fidelity_block = (
+            "\n"
+            + BACK_VIEW_FIDELITY.format(
+                back_reference_description=back_reference_description
+                or "(no separate description available — rely on the back "
+                "reference image alone, and still follow every rule above.)"
+            )
+            + back_owner_override
+            + "\n"
+        )
 
     length_rule = (
         "The kurti is SHORT length (hip to mid-thigh) — render the "
@@ -591,6 +663,9 @@ def build_pose_prompt(
         background=BACKGROUND_PRESETS[background_preset],
         lighting=LIGHTING,
         cleanup_rule=GARMENT_CLEANUP,
+        embroidery_color_note=embroidery_color_note(
+            embroidery_thread_color, embroidery_thread_color_name
+        ),
         back_fidelity_block=back_fidelity_block,
         negative_prompt=negative_prompt,
         output_spec=OUTPUT_SPEC,

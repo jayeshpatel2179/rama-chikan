@@ -48,6 +48,61 @@ async def detect_color(photo_bytes_list: list[bytes]) -> str:
     return json.loads(response.choices[0].message.content)["dominant_color"]
 
 
+_CONTRAST_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "embroidery_contrast",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "is_tonal": {"type": "boolean"},
+                "reasoning": {"type": "string"},
+            },
+            "required": ["is_tonal", "reasoning"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def detect_embroidery_contrast(photo_bytes_list: list[bytes]) -> dict:
+    """Flags garments where the embroidery thread is close to (or the same
+    as) the base fabric colour — tonal/self-coloured embroidery. Added after
+    a real failure: a tonal purple-on-purple kurti's motifs were barely
+    visible in a flat phone photo, so the image model's chikankari "prior"
+    (dense white thread, big yoke medallion) filled the gap instead of
+    reproducing the real, much plainer design. Used to warn the shop owner
+    BEFORE generation (bot/handlers/new_product.py) rather than silently
+    shipping a hallucinated draft."""
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "Look at the embroidery/motif thread colour versus the base "
+                "fabric colour on this garment. Is the thread close in "
+                "colour to the fabric (tonal / self-coloured embroidery — "
+                "e.g. purple thread on purple fabric — hard to see clearly "
+                "in a flat photo), or is it a clearly contrasting colour "
+                "(e.g. white/cream thread on a coloured fabric)? Set "
+                "is_tonal true only for genuinely low-contrast/self-coloured "
+                "embroidery, not merely a subtle or pastel-on-pastel case."
+            ),
+        }
+    ]
+    for photo_bytes in photo_bytes_list:
+        b64 = base64.b64encode(photo_bytes).decode("ascii")
+        content.append(
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        )
+    response = await _client.chat.completions.create(
+        model=_VISION_MODEL,
+        messages=[{"role": "user", "content": content}],
+        response_format=_CONTRAST_SCHEMA,
+    )
+    return json.loads(response.choices[0].message.content)
+
+
 _BACK_REFERENCE_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -123,6 +178,64 @@ async def describe_back_reference(back_photo_bytes: bytes) -> str:
     )
 
 
+_BACK_VERIFY_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "back_view_verification",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "matches_reference": {"type": "boolean"},
+                "issues": {"type": "string"},
+            },
+            "required": ["matches_reference", "issues"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def verify_back_view(
+    generated_bytes: bytes, back_reference_bytes: bytes, back_reference_description: str
+) -> dict:
+    """Post-generation check for back-view poses (bot/prompts.py's POSES 10
+    and 11) — compares the GENERATED image against the real raw back
+    reference photo and flags invented structure (a yoke panel, neck
+    medallion, motif cluster, or contrasting thread colour) that isn't
+    actually in the reference. Used to catch a hallucination and trigger one
+    regeneration attempt (bot/image_gen.py) before a wrong draft ever
+    reaches the shop owner."""
+    b64_gen = base64.b64encode(generated_bytes).decode("ascii")
+    b64_ref = base64.b64encode(back_reference_bytes).decode("ascii")
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "Image 1 is a GENERATED product photo's back view. Image 2 "
+                "is the REAL raw back-of-garment reference photo. Known "
+                "facts about the real back, verified separately: "
+                f"{back_reference_description} Does the generated image "
+                "(Image 1) match the real back (Image 2) — same yoke/"
+                "no-yoke, same rough motif density and placement, same "
+                "thread colour (tonal vs contrasting)? Set matches_reference "
+                "false if the generated image added a yoke panel, neck "
+                "medallion, or motif cluster not present in the reference, "
+                "or rendered the embroidery in a different (e.g. "
+                "white/silver) colour than the reference actually shows."
+            ),
+        },
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_gen}"}},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_ref}"}},
+    ]
+    response = await _client.chat.completions.create(
+        model=_VISION_MODEL,
+        messages=[{"role": "user", "content": content}],
+        response_format=_BACK_VERIFY_SCHEMA,
+    )
+    return json.loads(response.choices[0].message.content)
+
+
 _PRODUCT_COPY_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -187,10 +300,24 @@ _ANSWER_PARSE_SCHEMA = {
                     "required": ["mode", "pose_numbers", "count"],
                     "additionalProperties": False,
                 },
+                "embroidery_thread_color": {
+                    "type": "string",
+                    "enum": ["tonal", "white_or_cream", "other"],
+                },
+                "embroidery_thread_color_name": {"type": "string"},
+                "back_style": {
+                    "type": "string",
+                    "enum": [
+                        "plain_or_same_as_front",
+                        "has_yoke_or_neck_embroidery",
+                        "not_specified",
+                    ],
+                },
             },
             "required": [
                 "material", "sizes", "price", "discount_pct", "categories", "is_bestseller",
                 "kurti_length", "listing_type", "pose_request",
+                "embroidery_thread_color", "embroidery_thread_color_name", "back_style",
             ],
             "additionalProperties": False,
         },
@@ -199,7 +326,7 @@ _ANSWER_PARSE_SCHEMA = {
 
 
 async def parse_new_product_answers(text: str) -> dict:
-    """Extracts the 9 answers (material, sizes+qty, price, discount %,
+    """Extracts the 11 answers (material, sizes+qty, price, discount %,
     category/categories, bestseller, kurti length, listing type, pose
     request) from one free-text reply like:
 
@@ -224,16 +351,27 @@ async def parse_new_product_answers(text: str) -> dict:
     deliberately reworded away from "with/without pyjama" after that
     phrasing caused the image model to hallucinate bare-legged output.
 
-    pose_request captures Question 9's answer: either specific pose numbers
+    pose_request captures Question 11's answer: either specific pose numbers
     ("1, 5, 3" -> mode 'specific', pose_numbers [1,5,3]) or just a count
     ("4" -> mode 'count', count 4). The actual pose IDs to generate are
     resolved afterward by bot.prompts.resolve_pose_selection, not here —
-    this function only extracts what the owner typed."""
+    this function only extracts what the owner typed.
+
+    embroidery_thread_color/embroidery_thread_color_name (Question 9) and
+    back_style (Question 10) were added after a real hallucination: a tonal
+    (self-coloured) purple-on-purple kurti got a hallucinated white yoke
+    medallion on the back because the reference photo alone carried almost
+    no usable signal. These are injected as hard constraints into the
+    generation prompt (bot/prompts.py) — a declared "tonal" thread colour
+    blocks the model from rendering white/silver/contrasting embroidery, and
+    a declared "plain_or_same_as_front" back blocks it from inventing a yoke
+    panel, overriding even the model's own visual read of the back photo."""
     prompt = (
-        "Extract structured answers from this shopkeeper's reply to 9 questions "
-        "(material, sizes with quantity, price, discount percent, "
+        "Extract structured answers from this shopkeeper's reply to 11 "
+        "questions (material, sizes with quantity, price, discount percent, "
         "category/categories, whether this is a bestseller, kurti length, "
-        "listing type, and a pose request). "
+        "listing type, embroidery thread colour, back style, and a pose "
+        "request). "
         "Normalize every size to one of exactly: XS, S, M, L, XL, XXL, 3XL. "
         "If no discount is mentioned, discount_pct is 0. Each category must be "
         "exactly 'For Nani', 'For Mom', or 'For Me' — the reply may name one, "
@@ -253,6 +391,20 @@ async def parse_new_product_answers(text: str) -> dict:
         "single number with no list context (e.g. '4' meaning 'give me 4 "
         "images'), set mode to 'count' and count to that integer (pose_numbers "
         "can be empty). Pose numbers are always between 1 and 11.\n\n"
+        "For the embroidery thread colour question: if the reply says the "
+        "thread is the same colour as the fabric, self-coloured, or 'tonal', "
+        "set embroidery_thread_color to 'tonal' and leave "
+        "embroidery_thread_color_name empty. If it says white or cream, set "
+        "'white_or_cream' and leave the name empty. If it names any other "
+        "specific colour (e.g. gold, silver, blue), set 'other' and put that "
+        "colour name in embroidery_thread_color_name.\n\n"
+        "For the back style question: if the reply says the back is plain, "
+        "has no yoke/medallion, or is the same scattered motifs as the "
+        "front, set back_style to 'plain_or_same_as_front'. If it says the "
+        "back has a yoke panel, neck embroidery, or a decorative back "
+        "panel, set 'has_yoke_or_neck_embroidery'. If the reply says there's "
+        "no back photo, skips this question, or doesn't address it at all, "
+        "set 'not_specified'.\n\n"
         "Reply:\n" + text
     )
     response = await _client.chat.completions.create(

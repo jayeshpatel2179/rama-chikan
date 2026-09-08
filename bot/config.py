@@ -77,7 +77,7 @@ IMAGE_GEN_QUALITY = "medium"
 FINAL_IMAGE_WIDTH = 1000
 FINAL_IMAGE_HEIGHT = 1250
 
-# How many of the owner's requested/auto-selected poses (Question 9,
+# How many of the owner's requested/auto-selected poses (Question 11,
 # bot/prompts.py's 11-pose library) actually get generated right now.
 # Raised to 11 (2026-08-27) to test the full pose system on a real product.
 IMAGE_GENERATION_CAP = 11

@@ -27,21 +27,27 @@ WAITING_PHOTOS, WAITING_ANSWERS, CONFIRMING = range(3)
 # No fixed count required — 1 raw photo (just the front) works fine, so does
 # a handful of angles/close-ups. This is just a sane upper bound so nobody
 # accidentally floods the draft with dozens of photos; output count is
-# controlled separately by Question 9 (pose selection) + IMAGE_GENERATION_CAP,
+# controlled separately by Question 11 (pose selection) + IMAGE_GENERATION_CAP,
 # not by how many raw photos went in.
 MAX_RAW_PHOTOS = 6
 
 # Front/back tagging: the normal case (per the owner's actual workflow) is
-# exactly 2 raw photos, sent front then back. When that's what comes in,
-# _finish_photos tags photo 1 as FRONT and photo 2 as BACK (draft["front_photo"]
-# / draft["back_photo"]) and tells the owner which is which, with a Swap
+# exactly 2 raw photos, sent front then back. When 2+ come in, _finish_photos
+# tags photo 1 as FRONT and photo 2 as BACK (draft["front_photo"] /
+# draft["back_photo"]) and tells the owner which is which, with a Swap
 # button in case the order was backwards — see swap_front_back_tap. Poses
 # 10/11 (back view) then use ONLY the back photo as their garment reference
-# (bot/image_gen.py), never blended with the front. When the raw-photo count
-# isn't exactly 2 (just 1, or more than 2 undifferentiated angle shots),
-# front_photo/back_photo stay None and generation falls back to the old
-# undifferentiated pool for whichever side is ambiguous — this only reliably
-# fixes the standard front+back submission, which is the reported case.
+# (bot/image_gen.py), never blended with the front. When only 1 raw photo is
+# sent, front_photo/back_photo stay None and generation falls back to the
+# old undifferentiated pool — this only reliably fixes the standard
+# front+back submission, which is the normal case.
+#
+# Photos 3-6 (all optional) are close-ups, tagged by POSITION — added after
+# a real hallucination where a tonal/low-contrast garment gave the model too
+# little signal from just 2 flat shots: photo 3 = neckline close-up
+# (supplements pose 3), photo 4 = back yoke close-up (supplements poses
+# 10/11), photo 5 = sleeve close-up, photo 6 = fabric texture close-up (both
+# supplement every pose). See bot/image_gen.py for exactly how each is used.
 
 # Short menu labels for the chat — distinct from POSES[n].label (which is
 # the fuller name used in the mega prompt) so the intake message stays scannable.
@@ -80,7 +86,12 @@ _QUESTIONS_MESSAGE = (
     "6. Is this a best-selling kurti? (yes/no)\n"
     "7. Kurti length — short or long?\n"
     "8. What's in this listing — kurti + pyjama set, or kurti only?\n"
-    "9. How many images, and which poses? Reply with pose numbers, e.g. "
+    "9. Embroidery thread colour — white/cream, the same colour as the "
+    "fabric (tonal/self-coloured), or another colour? (name it if so)\n"
+    "10. Does the back have a yoke panel or neck embroidery, or is it "
+    "plain / the same scattered motifs as the front? (say \"no back photo\" "
+    "if you didn't send one)\n"
+    "11. How many images, and which poses? Reply with pose numbers, e.g. "
     "\"1, 5, 3\" — or type \"all poses\" for all 11 — or just give a number "
     "like \"4\" and I'll pick the best combination.\n" + _POSE_MENU
 )
@@ -110,6 +121,15 @@ def _front_back_swap_keyboard(session_id: str) -> InlineKeyboardMarkup:
             "🔄 Swap — photo 1 was actually the BACK",
             callback_data=f"swap_front_back:{session_id}",
         )]]
+    )
+
+
+def _tonal_warning_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("▶️ Proceed anyway", callback_data=f"tonal_proceed:{session_id}")],
+            [InlineKeyboardButton("📷 I'll resend photos", callback_data=f"tonal_resend:{session_id}")],
+        ]
     )
 
 
@@ -187,21 +207,92 @@ async def _finish_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Received {count} photo(s) — that's all the photos. Looking at them now..."
     )
 
-    if count == 2:
+    # Position-based tagging: photo 1 = front, photo 2 = back, photos 3-6
+    # (all optional) = close-ups in a fixed order — see the module comment
+    # above for why each close-up exists and how it's used.
+    _CLOSEUP_KEYS = ["neckline_closeup", "back_yoke_closeup", "sleeve_closeup", "fabric_closeup"]
+    _CLOSEUP_LABELS = [
+        "neckline close-up", "back yoke close-up", "sleeve close-up", "fabric texture close-up",
+    ]
+    if count >= 2:
         draft["front_photo"], draft["back_photo"] = raw_photos[0], raw_photos[1]
-        await message.reply_text(
-            "Treating photo 1 as FRONT and photo 2 as BACK for pose generation.",
-            reply_markup=_front_back_swap_keyboard(draft["session_id"]),
-        )
+        note = "Treating photo 1 as FRONT and photo 2 as BACK for pose generation."
+        used_labels = []
+        for i, (key, label) in enumerate(zip(_CLOSEUP_KEYS, _CLOSEUP_LABELS)):
+            photo_index = i + 2  # photos 3,4,5,6 -> raw_photos[2..5]
+            if count > photo_index:
+                draft[key] = raw_photos[photo_index]
+                used_labels.append(f"photo {photo_index + 1} = {label}")
+        if used_labels:
+            note += " Extra photo(s): " + ", ".join(used_labels) + "."
+        await message.reply_text(note, reply_markup=_front_back_swap_keyboard(draft["session_id"]))
     else:
         draft["front_photo"] = None
         draft["back_photo"] = None
 
     draft["color"] = await ai.detect_color(raw_photos)
+    contrast = await ai.detect_embroidery_contrast(raw_photos)
     draft.pop("active_task", None)
 
+    if contrast["is_tonal"]:
+        # Marks that the WAITING_PHOTOS the function returns to below is
+        # "waiting on the tonal decision", not "waiting on more photos" —
+        # swap_front_back_tap checks this to know whether the swap button
+        # (sent alongside, still live) should return here or straight on to
+        # WAITING_ANSWERS.
+        draft["tonal_warning_pending"] = True
+        await message.reply_text(
+            "Heads up: this garment's embroidery looks close in colour to "
+            "the fabric (tonal/self-coloured), which makes it hard to "
+            "reproduce accurately from a flat photo — the AI may not "
+            "render the motifs correctly.\n\n"
+            "For a better result, you could resend with: a close-up of the "
+            "neckline, a close-up of the back, and light from the side "
+            "instead of overhead (so the thread relief actually shows).\n\n"
+            "Proceed anyway, or resend photos?",
+            reply_markup=_tonal_warning_keyboard(draft["session_id"]),
+        )
+        return WAITING_PHOTOS
+
+    draft.pop("tonal_warning_pending", None)
     await message.reply_text(_QUESTIONS_MESSAGE)
     return WAITING_ANSWERS
+
+
+async def tonal_proceed_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    draft.pop("tonal_warning_pending", None)
+    await query.message.reply_text(_QUESTIONS_MESSAGE)
+    return WAITING_ANSWERS
+
+
+async def tonal_resend_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    draft.pop("tonal_warning_pending", None)
+    draft["raw_photos"] = []
+    for key in ("front_photo", "back_photo", "neckline_closeup", "back_yoke_closeup",
+                "sleeve_closeup", "fabric_closeup"):
+        draft.pop(key, None)
+    await query.message.reply_text(
+        "Okay — send the new photos whenever ready (front, back, and any close-ups)."
+    )
+    return WAITING_PHOTOS
 
 
 async def swap_front_back_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -215,12 +306,15 @@ async def swap_front_back_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
     draft["front_photo"], draft["back_photo"] = draft.get("back_photo"), draft.get("front_photo")
     await query.answer("Swapped.")
     await query.edit_message_text("Swapped — photo 1 is now BACK, photo 2 is now FRONT.")
-    return WAITING_ANSWERS
+    # If the tonal-contrast warning is still pending (see _finish_photos),
+    # stay in WAITING_PHOTOS — the owner hasn't answered Proceed/Resend yet,
+    # so jumping to WAITING_ANSWERS would skip straight past that decision.
+    return WAITING_PHOTOS if draft.get("tonal_warning_pending") else WAITING_ANSWERS
 
 
 async def photo_during_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Already have the photo(s) for this product — please answer the 9 questions above."
+        "Already have the photo(s) for this product — please answer the 11 questions above."
     )
     return WAITING_ANSWERS
 
@@ -236,7 +330,7 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         logger.exception("Failed to parse new-product answers")
         await update.message.reply_text(
-            "Couldn't read that — please reply with all 9 answers in one message."
+            "Couldn't read that — please reply with all 11 answers in one message."
         )
         return WAITING_ANSWERS
 
@@ -252,22 +346,22 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if invalid_sizes or not parsed["sizes"]:
         await update.message.reply_text(
             f"Not valid sizes: {', '.join(invalid_sizes) or '(none given)'}.\n"
-            f"Rama Chikan only sells: {', '.join(VALID_SIZES)}. Please resend all 9 answers."
+            f"Rama Chikan only sells: {', '.join(VALID_SIZES)}. Please resend all 11 answers."
         )
         return WAITING_ANSWERS
 
     if parsed["price"] <= 0:
-        await update.message.reply_text("Price must be a positive number — please resend all 9 answers.")
+        await update.message.reply_text("Price must be a positive number — please resend all 11 answers.")
         return WAITING_ANSWERS
 
     if not (0 <= parsed["discount_pct"] < 100):
-        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 9 answers.")
+        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 11 answers.")
         return WAITING_ANSWERS
 
     if not parsed["categories"]:
         await update.message.reply_text(
             "Didn't catch a category — reply with For Nani, For Mom, and/or For Me "
-            "(please resend all 9 answers)."
+            "(please resend all 11 answers)."
         )
         return WAITING_ANSWERS
 
@@ -279,6 +373,9 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     draft["is_bestseller"] = parsed["is_bestseller"]
     draft["kurti_length"] = parsed["kurti_length"]
     draft["listing_type"] = parsed["listing_type"]
+    draft["embroidery_thread_color"] = parsed["embroidery_thread_color"]
+    draft["embroidery_thread_color_name"] = parsed["embroidery_thread_color_name"]
+    draft["back_style"] = parsed["back_style"]
     draft["compare_at_price"] = shopify_client.compute_compare_at_price(
         parsed["price"], parsed["discount_pct"]
     )
@@ -290,7 +387,7 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(
             "Couldn't resolve any poses from that — reply with pose numbers "
             "like \"1, 5, 3\", \"all poses\", or a count like \"4\" for "
-            "question 9 (please resend all 9 answers)."
+            "question 11 (please resend all 11 answers)."
         )
         return WAITING_ANSWERS
 
@@ -335,7 +432,7 @@ async def proceed_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_reply_markup(reply_markup=None)
     selected = draft.pop("pending_selected_poses", [])
     if not selected:
-        await query.message.reply_text("Nothing to generate — resend the 9 answers with different poses.")
+        await query.message.reply_text("Nothing to generate — resend the 11 answers with different poses.")
         return WAITING_ANSWERS
     return await _generate_and_send_draft(query.message, context, draft, selected)
 
@@ -365,15 +462,23 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
 
     draft["active_task"] = asyncio.current_task()
     try:
-        images, generated_poses, queued_poses = await image_gen.generate_model_images(
+        images, generated_poses, queued_poses, flagged_poses = await image_gen.generate_model_images(
             draft["raw_photos"], draft.get("front_photo"), draft.get("back_photo"),
             draft["color"], draft["material"],
             draft["kurti_length"], draft["listing_type"], resolved_poses,
             draft["categories"],
+            embroidery_thread_color=draft["embroidery_thread_color"],
+            embroidery_thread_color_name=draft["embroidery_thread_color_name"],
+            back_style=draft["back_style"],
+            neckline_closeup=draft.get("neckline_closeup"),
+            back_yoke_closeup=draft.get("back_yoke_closeup"),
+            sleeve_closeup=draft.get("sleeve_closeup"),
+            fabric_closeup=draft.get("fabric_closeup"),
         )
         draft["generated_images"] = images
         draft["generated_poses"] = generated_poses
         draft["queued_poses"] = queued_poses
+        draft["flagged_poses"] = flagged_poses
 
         if queued_poses:
             await message.reply_text(
@@ -392,7 +497,7 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
     except Exception:
         logger.exception("Image/description generation failed")
         await message.reply_text(
-            "Image generation failed — nothing was published. Send the 9 answers again to retry."
+            "Image generation failed — nothing was published. Send the 11 answers again to retry."
         )
         return WAITING_ANSWERS
     finally:
@@ -417,6 +522,17 @@ def _description_html_to_telegram_text(description_html: str) -> str:
     return html_lib.unescape(text).strip()
 
 
+def _thread_color_display(draft: dict) -> str:
+    color = draft.get("embroidery_thread_color")
+    if color == "tonal":
+        return "tonal (same as fabric)"
+    if color == "white_or_cream":
+        return "white/cream"
+    if color == "other":
+        return draft.get("embroidery_thread_color_name") or "other"
+    return color or "not specified"
+
+
 def _draft_caption(draft: dict) -> str:
     sizes_summary = ", ".join(
         f"{size}: {qty}" for size, qty in draft["size_quantities"].items()
@@ -432,6 +548,7 @@ def _draft_caption(draft: dict) -> str:
         _description_html_to_telegram_text(draft["description_html"]),
         "",
         f"Material: {draft['material']}",
+        f"Embroidery thread: {_thread_color_display(draft)}",
         f"Category: {', '.join(draft['categories'])}",
         f"Length: {draft['kurti_length'].capitalize()}",
         "Listing: " + (
@@ -446,6 +563,12 @@ def _draft_caption(draft: dict) -> str:
         lines.append(
             "Poses queued (not generated yet — API credit cap): "
             + ", ".join(str(p) for p in draft["queued_poses"])
+        )
+    if draft.get("flagged_poses"):
+        lines.append(
+            "⚠️ Pose(s) " + ", ".join(str(p) for p in draft["flagged_poses"])
+            + " may not perfectly match the back reference photo even after "
+            "a retry — please check before going live."
         )
     if unlisted:
         lines.append(f"Out of stock (not purchasable): {', '.join(unlisted)}")
@@ -563,7 +686,17 @@ def build_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO, receive_photo)],
         states={
-            WAITING_PHOTOS: [MessageHandler(filters.PHOTO, receive_photo)],
+            WAITING_PHOTOS: [
+                MessageHandler(filters.PHOTO, receive_photo),
+                # swap_front_back_tap is registered here too (not just under
+                # WAITING_ANSWERS below) because _finish_photos can land the
+                # conversation back in WAITING_PHOTOS when the tonal-contrast
+                # gate fires — the swap button it sent alongside stays live
+                # either way.
+                CallbackQueryHandler(swap_front_back_tap, pattern="^swap_front_back:"),
+                CallbackQueryHandler(tonal_proceed_tap, pattern="^tonal_proceed:"),
+                CallbackQueryHandler(tonal_resend_tap, pattern="^tonal_resend:"),
+            ],
             WAITING_ANSWERS: [
                 MessageHandler(filters.PHOTO, photo_during_answers),
                 CallbackQueryHandler(proceed_blocked_tap, pattern="^proceed_blocked:"),

@@ -9,7 +9,7 @@ from bot.config import LOG_LEVEL, TELEGRAM_BOT_TOKEN
 from bot.handlers.cancel import cancel_idle
 from bot.handlers.new_product import build_conversation_handler as build_new_product_handler
 from bot.handlers.out_of_stock import build_conversation_handler as build_out_of_stock_handler
-from bot.handlers.start import help_command, start, unrecognized_text
+from bot.handlers.start import help_command, start, tips_command, unrecognized_text
 
 # Both conversation flows intentionally mix message handlers (photos/text)
 # and callback-query handlers (button taps) in the same ConversationHandler
@@ -57,6 +57,7 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("tips", tips_command))
     application.add_handler(build_new_product_handler())
     application.add_handler(build_out_of_stock_handler())
     # Registered after both conversation handlers so an in-progress
