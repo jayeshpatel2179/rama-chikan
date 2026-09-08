@@ -22,26 +22,18 @@ from bot.handlers.cancel import cancel
 
 logger = logging.getLogger(__name__)
 
-WAITING_PHOTOS, WAITING_ANSWERS, CONFIRMING = range(3)
+WAITING_FRONT_PHOTO, WAITING_BACK_PHOTO, WAITING_ANSWERS, CONFIRMING = range(4)
 
-# No fixed count required — 1 raw photo (just the front) works fine, so does
-# a handful of angles/close-ups. This is just a sane upper bound so nobody
-# accidentally floods the draft with dozens of photos; output count is
-# controlled separately by Question 9 (pose selection) + IMAGE_GENERATION_CAP,
-# not by how many raw photos went in.
-MAX_RAW_PHOTOS = 6
-
-# Front/back tagging: the normal case (per the owner's actual workflow) is
-# exactly 2 raw photos, sent front then back. When that's what comes in,
-# _finish_photos tags photo 1 as FRONT and photo 2 as BACK (draft["front_photo"]
-# / draft["back_photo"]) and tells the owner which is which, with a Swap
-# button in case the order was backwards — see swap_front_back_tap. Poses
-# 10/11 (back view) then use ONLY the back photo as their garment reference
-# (bot/image_gen.py), never blended with the front. When the raw-photo count
-# isn't exactly 2 (just 1, or more than 2 undifferentiated angle shots),
-# front_photo/back_photo stay None and generation falls back to the old
-# undifferentiated pool for whichever side is ambiguous — this only reliably
-# fixes the standard front+back submission, which is the reported case.
+# Photo intake is sequential, one at a time — the bot explicitly asks for
+# the FRONT photo first, waits for it, then explicitly asks for the BACK
+# photo and waits for that before moving on to the 9 questions. Replaces an
+# earlier batch/debounce design (send several photos at once, guess which is
+# front/back by position) that turned out to hurt generation accuracy —
+# always sending both photos as explicit, individually-confirmed
+# draft["front_photo"] / draft["back_photo"] removes that guesswork
+# entirely, and there's no ambiguity left to need a swap button for. Poses
+# 10/11 (back view) use ONLY the back photo as their garment reference
+# (bot/image_gen.py), never blended with the front.
 
 # Short menu labels for the chat — distinct from POSES[n].label (which is
 # the fuller name used in the mega prompt) so the intake message stays scannable.
@@ -60,13 +52,6 @@ _POSE_MENU_LABELS = {
 }
 assert set(_POSE_MENU_LABELS) == set(prompts.POSES), "pose menu is out of sync with bot.prompts.POSES"
 _POSE_MENU = "\n".join(f"{n} = {label}" for n, label in _POSE_MENU_LABELS.items())
-
-# How long to wait after the last photo before assuming the batch is done.
-# When a phone sends several photos at once (multi-select), Telegram
-# delivers them as separate messages a fraction of a second apart — this
-# window lets them all land before the bot reacts, so a multi-photo send is
-# announced once ("Received 2 photo(s)...") instead of once per photo.
-_PHOTO_BATCH_DEBOUNCE_SECONDS = 2.0
 
 _QUESTIONS_MESSAGE = (
     "A few quick questions — reply to all of them in ONE message:\n\n"
@@ -104,15 +89,6 @@ def _draft_expired(draft: dict) -> bool:
     return ready_at is not None and (time.monotonic() - ready_at) > DRAFT_TTL_SECONDS
 
 
-def _front_back_swap_keyboard(session_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(
-            "🔄 Swap — photo 1 was actually the BACK",
-            callback_data=f"swap_front_back:{session_id}",
-        )]]
-    )
-
-
 def _draft_keyboard(session_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -148,74 +124,45 @@ def _live_draft(context: ContextTypes.DEFAULT_TYPE, session_id: str) -> dict | N
     return draft
 
 
-async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receive_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     draft = context.chat_data.setdefault("draft", {})
     draft.setdefault("session_id", _new_session_id())
-    draft["active_task"] = asyncio.current_task()
-    raw_photos = draft.setdefault("raw_photos", [])
 
     largest = update.message.photo[-1]
     file = await context.bot.get_file(largest.file_id)
-    raw_photos.append(bytes(await file.download_as_bytearray()))
-    count_after_this_photo = len(raw_photos)
+    draft["front_photo"] = bytes(await file.download_as_bytearray())
 
-    if count_after_this_photo >= MAX_RAW_PHOTOS:
-        return await _finish_photos(update, context)
-
-    # Debounce: wait briefly, then only the invocation that still sees the
-    # same photo count (i.e. no further photo arrived while it waited) is
-    # the last one in the batch, and finalizes for everyone.
-    await asyncio.sleep(_PHOTO_BATCH_DEBOUNCE_SECONDS)
-    if context.chat_data.get("draft") is not draft:
-        # Session was cancelled (or replaced) while this was asleep.
-        return ConversationHandler.END
-    if len(raw_photos) != count_after_this_photo:
-        return WAITING_PHOTOS
-
-    return await _finish_photos(update, context)
+    await update.message.reply_text("Got the front photo. Now send the back photo.")
+    return WAITING_BACK_PHOTO
 
 
-async def _finish_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def prompt_for_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Please send the front photo of the garment first.")
+    return WAITING_FRONT_PHOTO
+
+
+async def receive_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     draft = context.chat_data.get("draft")
     if draft is None:
         return ConversationHandler.END
-    message = update.effective_message
-    raw_photos = draft["raw_photos"]
-    count = len(raw_photos)
 
-    await message.reply_text(
-        f"Received {count} photo(s) — that's all the photos. Looking at them now..."
-    )
+    draft["active_task"] = asyncio.current_task()
+    largest = update.message.photo[-1]
+    file = await context.bot.get_file(largest.file_id)
+    draft["back_photo"] = bytes(await file.download_as_bytearray())
+    draft["raw_photos"] = [draft["front_photo"], draft["back_photo"]]
 
-    if count == 2:
-        draft["front_photo"], draft["back_photo"] = raw_photos[0], raw_photos[1]
-        await message.reply_text(
-            "Treating photo 1 as FRONT and photo 2 as BACK for pose generation.",
-            reply_markup=_front_back_swap_keyboard(draft["session_id"]),
-        )
-    else:
-        draft["front_photo"] = None
-        draft["back_photo"] = None
-
-    draft["color"] = await ai.detect_color(raw_photos)
+    await update.message.reply_text("Got the back photo. Looking at them now...")
+    draft["color"] = await ai.detect_color(draft["raw_photos"])
     draft.pop("active_task", None)
 
-    await message.reply_text(_QUESTIONS_MESSAGE)
+    await update.message.reply_text(_QUESTIONS_MESSAGE)
     return WAITING_ANSWERS
 
 
-async def swap_front_back_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    session_id = query.data.split(":", 1)[1]
-    draft = _live_draft(context, session_id)
-    if draft is None:
-        await _reply_dead_session(query)
-        return ConversationHandler.END
-
-    draft["front_photo"], draft["back_photo"] = draft.get("back_photo"), draft.get("front_photo")
-    await query.answer("Swapped.")
-    await query.edit_message_text("Swapped — photo 1 is now BACK, photo 2 is now FRONT.")
-    return WAITING_ANSWERS
+async def prompt_for_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Got the front photo already — now send the back photo.")
+    return WAITING_BACK_PHOTO
 
 
 async def photo_during_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -561,14 +508,20 @@ async def abort_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def build_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[MessageHandler(filters.PHOTO, receive_photo)],
+        entry_points=[MessageHandler(filters.PHOTO, receive_front_photo)],
         states={
-            WAITING_PHOTOS: [MessageHandler(filters.PHOTO, receive_photo)],
+            WAITING_FRONT_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_front_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_front_photo),
+            ],
+            WAITING_BACK_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_back_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_back_photo),
+            ],
             WAITING_ANSWERS: [
                 MessageHandler(filters.PHOTO, photo_during_answers),
                 CallbackQueryHandler(proceed_blocked_tap, pattern="^proceed_blocked:"),
                 CallbackQueryHandler(cancel_blocked_tap, pattern="^cancel_blocked:"),
-                CallbackQueryHandler(swap_front_back_tap, pattern="^swap_front_back:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_answers),
             ],
             CONFIRMING: [

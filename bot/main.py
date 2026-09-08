@@ -32,11 +32,6 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def build_application() -> Application:
-    # concurrent_updates lets a photo's handler still be "awake" (mid debounce
-    # sleep in new_product.receive_photo) when the next photo of the same
-    # multi-select batch arrives, so the batch can be detected and announced
-    # once instead of once per photo. Safe for this single-owner bot.
-    #
     # PTB's default network timeouts (5s connect/read/write) are too short
     # for uploading the generated product photo(s) back to Telegram as a
     # media group. Photo/file uploads (sendMediaGroup, sendPhoto) actually
