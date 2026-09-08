@@ -78,54 +78,29 @@ async def generate_model_images(
     listing_type: str,
     resolved_poses: list[int],
     categories: list[str],
-    embroidery_thread_color: str = "white_or_cream",
-    embroidery_thread_color_name: str = "",
-    back_style: str = "not_specified",
-    neckline_closeup: bytes | None = None,
-    back_yoke_closeup: bytes | None = None,
-    sleeve_closeup: bytes | None = None,
-    fabric_closeup: bytes | None = None,
-) -> tuple[list[bytes], list[int], list[int], list[int]]:
+) -> tuple[list[bytes], list[int], list[int]]:
     """resolved_poses: the ordered pose ids already resolved by
-    bot.prompts.resolve_pose_selection (Question 11 answer + eligibility
+    bot.prompts.resolve_pose_selection (Question 9 answer + eligibility
     filtering already applied by the caller).
 
-    front_photo / back_photo: set by bot/handlers/new_product.py whenever 2
-    or more raw photos were sent (the normal case — front then back, plus
-    optional close-ups after). When set, these are the ONLY garment
-    reference used for front-facing vs back-facing poses respectively,
-    never blended together — this is the fix for a real regression where
-    back views were generated from an undifferentiated pool of raw photos
-    (plus a front-posed face reference image) and ended up copying the
-    front's yoke/motif treatment onto the back. When either is None (only 1
-    raw photo, with no reliable way to tell front from back), falls back to
-    the old undifferentiated raw_photo_bytes pool for that side, same as
-    before this fix.
-
-    neckline_closeup / back_yoke_closeup / sleeve_closeup / fabric_closeup:
-    optional extra reference photos (raw photos 3-6, see
-    bot/handlers/new_product.py) added after a real hallucination where a
-    tonal/low-contrast garment gave the model too little signal from just 2
-    flat shots. neckline_closeup only supplements pose 3 (the embroidery
-    detail crop); back_yoke_closeup only supplements back-facing poses
-    10/11; sleeve_closeup and fabric_closeup supplement every pose, since
-    sleeve and fabric detail matter regardless of which side is framed.
-
-    embroidery_thread_color / embroidery_thread_color_name (Question 9) and
-    back_style (Question 10): passed straight through to every pose's
-    prompt (bot.prompts.build_pose_prompt) — see that module for how they
-    become hard constraints rather than hints.
+    front_photo / back_photo: set by bot/handlers/new_product.py only when
+    exactly 2 raw photos were sent (the normal case — front then back).
+    When set, these are the ONLY garment reference used for front-facing vs
+    back-facing poses respectively, never blended together — this is the
+    fix for a real regression where back views were generated from an
+    undifferentiated pool of raw photos (plus a front-posed face reference
+    image) and ended up copying the front's yoke/motif treatment onto the
+    back. When either is None (1 raw photo, or more than 2 with no reliable
+    way to tell which is which), falls back to the old undifferentiated
+    raw_photo_bytes pool for that side, same as before this fix.
 
     categories: Question 5's answer — resolved ONCE per product into a
     MODEL_AGE bucket (bot.prompts.resolve_model_age_bucket) and reused in
     every image's prompt, same as background_preset/product_identity below.
 
-    Returns (images, pose_ids_generated, pose_ids_queued, pose_ids_flagged).
-    queued is whatever's left in resolved_poses past IMAGE_GENERATION_CAP,
-    reported to the owner rather than silently dropped. flagged is any
-    back-facing pose that still didn't match its reference after one
-    regeneration attempt (see the verify-and-retry block below) — surfaced
-    to the owner as a review warning rather than silently shipped.
+    Returns (images, pose_ids_generated, pose_ids_queued) — queued is
+    whatever's left in resolved_poses past IMAGE_GENERATION_CAP, reported
+    to the owner rather than silently dropped.
     """
     to_generate = resolved_poses[:IMAGE_GENERATION_CAP]
     queued = resolved_poses[IMAGE_GENERATION_CAP:]
@@ -147,7 +122,6 @@ async def generate_model_images(
         back_reference_description = await ai.describe_back_reference(back_photo)
 
     results: list[bytes] = []
-    flagged: list[int] = []
     face_reference: bytes | None = None
 
     for pose_id in to_generate:
@@ -158,16 +132,8 @@ async def generate_model_images(
             # BACK_REFERENCE only — never the front photo, never blended
             # with it. See the docstring above for why.
             garment_bytes = [back_photo] if back_photo is not None else raw_photo_bytes
-            if back_yoke_closeup is not None:
-                garment_bytes = garment_bytes + [back_yoke_closeup]
         else:
             garment_bytes = [front_photo] if front_photo is not None else raw_photo_bytes
-            if pose_id == 3 and neckline_closeup is not None:
-                garment_bytes = garment_bytes + [neckline_closeup]
-        if sleeve_closeup is not None:
-            garment_bytes = garment_bytes + [sleeve_closeup]
-        if fabric_closeup is not None:
-            garment_bytes = garment_bytes + [fabric_closeup]
 
         reference_images = [io.BytesIO(b) for b in garment_bytes]
         for buf in reference_images:
@@ -197,9 +163,6 @@ async def generate_model_images(
             has_face_reference=use_face_reference,
             model_age=model_age,
             back_reference_description=back_reference_description,
-            embroidery_thread_color=embroidery_thread_color,
-            embroidery_thread_color_name=embroidery_thread_color_name,
-            back_style=back_style,
         )
 
         response = await _client.images.edit(
@@ -210,42 +173,6 @@ async def generate_model_images(
             quality=IMAGE_GEN_QUALITY,
         )
         raw_png = base64.b64decode(response.data[0].b64_json)
-
-        # Verify-and-retry: catches exactly the failure mode that prompted
-        # this block — a back view that invents a yoke/medallion or renders
-        # tonal embroidery in the wrong colour despite the fidelity rules
-        # above. One regeneration attempt with the specific issue appended
-        # as a strict correction, then accept whatever comes out (never
-        # loops indefinitely) — if it's STILL wrong, it's surfaced to the
-        # owner as a review warning (draft["flagged_poses"] in
-        # bot/handlers/new_product.py) rather than silently shipped either way.
-        if pose.requires_back_reference and back_photo is not None:
-            verification = await ai.verify_back_view(
-                raw_png, back_photo, back_reference_description or ""
-            )
-            if not verification["matches_reference"]:
-                retry_images = [io.BytesIO(b) for b in garment_bytes]
-                for buf in retry_images:
-                    buf.name = "raw.png"
-                strengthened_prompt = (
-                    prompt
-                    + "\n\nSTRICT CORRECTION (a previous attempt failed this "
-                    "exact check — fix it): " + verification["issues"]
-                )
-                retry_response = await _client.images.edit(
-                    model=IMAGE_GEN_MODEL,
-                    image=retry_images,
-                    prompt=strengthened_prompt,
-                    size=IMAGE_GEN_SIZE,
-                    quality=IMAGE_GEN_QUALITY,
-                )
-                raw_png = base64.b64decode(retry_response.data[0].b64_json)
-                recheck = await ai.verify_back_view(
-                    raw_png, back_photo, back_reference_description or ""
-                )
-                if not recheck["matches_reference"]:
-                    flagged.append(pose_id)
-
         final_png = _crop_to_exact_size(raw_png)
         results.append(final_png)
 
@@ -255,4 +182,4 @@ async def generate_model_images(
         if face_reference is None and not pose.requires_back_reference:
             face_reference = raw_png
 
-    return results, to_generate, queued, flagged
+    return results, to_generate, queued
