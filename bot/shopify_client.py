@@ -71,8 +71,8 @@ async def _graphql(query: str, variables: dict) -> dict:
 
 _LOCATIONS_QUERY = """
 query {
-  locations(first: 1) {
-    nodes { id }
+  locations(first: 10) {
+    nodes { id isActive }
   }
 }
 """
@@ -83,7 +83,15 @@ async def get_primary_location_id() -> str:
     if _location_id_cache:
         return _location_id_cache
     data = await _graphql(_LOCATIONS_QUERY, {})
-    _location_id_cache = data["locations"]["nodes"][0]["id"]
+    nodes = data["locations"]["nodes"]
+    # Don't just take whatever comes back first — a deactivated location
+    # (e.g. one swapped out after a pickup-address change) can't accept
+    # inventory, and Shopify's API doesn't guarantee active locations sort
+    # first. Pick the first genuinely active one.
+    active = next((n["id"] for n in nodes if n["isActive"]), None)
+    if active is None:
+        raise RuntimeError("No active Shopify location found to assign inventory to")
+    _location_id_cache = active
     return _location_id_cache
 
 
