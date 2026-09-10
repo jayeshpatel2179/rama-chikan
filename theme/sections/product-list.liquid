@@ -52,6 +52,30 @@
 
   {% capture list_items %}
     {% if product_list_collection != blank and shop.products_count != 0 %}
+      {% if section.settings.randomize_products %}
+        {% comment %}
+          Randomised sampler mode (homepage "Shop the Full Collection"): show a
+          fresh random handful of the collection's products every page load, so
+          the section rotates through the whole catalogue instead of freezing on
+          a fixed set. Pair this with the collection's own sort order set to
+          "Newest first" so the sample pool always includes just-published
+          products.
+        {% endcomment %}
+        {% assign randomized_products = product_list_collection.products | sample: max_items %}
+        {% for product in randomized_products %}
+          <div class="resource-list__item">
+            {% content_for 'block',
+              type: '_product-card',
+              id: 'static-product-card',
+              closest.product: product,
+              product_view_context: 'collection'
+            %}
+          </div>
+          {% unless forloop.last %}
+            <!--@list/split-->
+          {% endunless %}
+        {% endfor %}
+      {% else %}
       {% paginate product_list_collection.products by max_items %}
         {% for product in product_list_collection.products limit: max_items %}
         <div
@@ -70,6 +94,7 @@
           {% endunless %}
         {% endfor %}
       {% endpaginate %}
+      {% endif %}
     {% else %}
       {% for i in (1..max_items) %}
         <div
@@ -166,6 +191,13 @@
       "max": 16,
       "step": 1,
       "default": 4
+    },
+    {
+      "type": "checkbox",
+      "id": "randomize_products",
+      "label": "Show a random sample each load",
+      "info": "For a 'browse the whole catalogue' section. Set the collection's sort order to 'Newest first' so new products stay in the pool.",
+      "default": false
     },
     {
       "type": "range",

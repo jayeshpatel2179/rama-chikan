@@ -37,6 +37,7 @@
       "name": "t:names.hero",
       "settings": {
         "media_type_1": "image",
+        "image_1": "shopify://shop_images/rama-chikan-hero-banner.png",
         "media_type_2": "image",
         "stack_media_on_mobile": false,
         "custom_mobile_media": false,
@@ -56,9 +57,9 @@
         "section_height_custom": 50,
         "background_color": "rgba(0,0,0,0)",
         "toggle_overlay": true,
-        "overlay_color": "#12121266",
-        "overlay_style": "solid",
-        "gradient_direction": "to bottom",
+        "overlay_color": "#121212b3",
+        "overlay_style": "gradient",
+        "gradient_direction": "to top",
         "blurred_reflection": false,
         "reflection_opacity": 75,
         "padding-block-start": 100,
@@ -278,7 +279,9 @@
       "name": "t:names.collection_list",
       "settings": {
         "collection_list": [
+          "gid://shopify/Collection/572957360439",
           "gid://shopify/Collection/570532167991",
+          "gid://shopify/Collection/572957393207",
           "gid://shopify/Collection/570532200759",
           "gid://shopify/Collection/570532233527",
           "gid://shopify/Collection/570532266295",
@@ -286,7 +289,7 @@
         ],
         "layout_type": "grid",
         "carousel_on_mobile": true,
-        "columns": 5,
+        "columns": 7,
         "mobile_columns": "2",
         "mobile_card_size": "60cqw",
         "columns_gap": 16,
@@ -297,7 +300,7 @@
         "gap": 12,
         "padding-block-start": 48,
         "padding-block-end": 48,
-        "collection_handles": "kurtas,for-nani,for-mom,for-me,sale"
+        "collection_handles": "premium,kurtas,kurti-pyjama-set,for-nani,for-mom,for-me,sale"
       }
     },
     "divider_1": {
@@ -702,18 +705,13 @@
           },
           "blocks": {
             "product-card-gallery": {
-              "type": "_product-card-gallery",
-              "name": "t:names.product_card_media",
+              "type": "_product-card-gallery-shuffle",
+              "name": "Product image shuffle",
               "settings": {
+                "variant": "match",
                 "image_ratio": "portrait",
-                "border": "none",
-                "border_width": 1,
-                "border_opacity": 100,
-                "border_radius": 0,
-                "padding-block-start": 0,
-                "padding-block-end": 0,
-                "padding-inline-start": 0,
-                "padding-inline-end": 0
+                "max_images": 5,
+                "rotation_seconds": 4
               }
             },
             "product_title": {
@@ -912,18 +910,13 @@
           },
           "blocks": {
             "product_card_gallery_677WP3": {
-              "type": "_product-card-gallery",
-              "name": "t:names.product_card_media",
+              "type": "_product-card-gallery-shuffle",
+              "name": "Product image shuffle",
               "settings": {
+                "variant": "distinct",
                 "image_ratio": "portrait",
-                "border": "none",
-                "border_width": 1,
-                "border_opacity": 100,
-                "border_radius": 0,
-                "padding-block-start": 0,
-                "padding-block-end": 0,
-                "padding-inline-start": 0,
-                "padding-inline-end": 0
+                "max_images": 5,
+                "rotation_seconds": 3
               },
               "blocks": {}
             },
@@ -999,7 +992,8 @@
         "gap": 28,
         "background_color": "{{ settings.color_palette.background }}",
         "padding-block-start": 48,
-        "padding-block-end": 48
+        "padding-block-end": 48,
+        "randomize_products": true
       }
     }
   },

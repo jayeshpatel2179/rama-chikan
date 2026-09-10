@@ -1,0 +1,260 @@
+{%- doc -%}
+  Live, auto cross-fading product-card image — a product-card counterpart to
+  blocks/_collection-card-image-shuffle.liquid (the homepage "Shop by
+  Category" tile effect). Used ONLY by the homepage "New Arrivals" and
+  "Shop the Full Collection" sections (theme/templates/index.json), swapped
+  in for the stock `_product-card-gallery` block there.
+
+  Every other product card on the site (collection pages, search, related
+  products, Bestsellers) keeps the stock `_product-card-gallery` and is
+  completely untouched — same isolation approach as the collection-card
+  shuffle block.
+
+  variant:
+    - "match"    identical to the Shop by Category tile fade: opacity only,
+                 1.2s ease, 4s between changes. (Part 2 — New Arrivals.)
+    - "distinct" a deliberately different feel: slide-up + fade, a
+                 cubic-bezier ease, 3s between changes. (Part 3 — Shop the
+                 Full Collection.)
+
+  @param {object} closest.product - the product this card represents
+{%- enddoc -%}
+
+{% liquid
+  assign product = closest.product
+  assign variant = block.settings.variant | default: 'match'
+  assign max_images = block.settings.max_images | default: 5
+
+  if variant == 'distinct'
+    assign rotation_seconds = block.settings.rotation_seconds | default: 3
+  else
+    assign rotation_seconds = block.settings.rotation_seconds | default: 4
+  endif
+
+  assign ratio = '4 / 5'
+  case block.settings.image_ratio
+    when 'landscape'
+      assign ratio = '16 / 9'
+    when 'portrait'
+      assign ratio = '4 / 5'
+    when 'square'
+      assign ratio = '1 / 1'
+    when 'adapt'
+      assign ratio = product.featured_image.aspect_ratio
+  endcase
+  if ratio == 0 or ratio == null or ratio == blank
+    assign ratio = '4 / 5'
+  endif
+
+  assign widths = '240, 352, 480, 700, 900, 1200'
+  assign sizes = '(min-width: 750px) 25vw, 50vw'
+%}
+
+{%- if product != blank and product.images.size > 0 -%}
+  <div
+    class="card-gallery card-gallery-{{ block.id }}"
+    style="--gallery-aspect-ratio: {{ ratio }};"
+    {{ block.shopify_attributes }}
+  >
+    <a class="contents" href="{{ product.url }}" aria-label="{{ product.title }}">
+      <div
+        class="resource-image product-shuffle product-shuffle--{{ variant }}"
+        style="aspect-ratio: {{ ratio }};"
+        data-rotation-ms="{{ rotation_seconds | times: 1000 }}"
+      >
+        {%- for image in product.images limit: max_images -%}
+          {% liquid
+            assign img_class = 'resource-image__image product-shuffle__img'
+            assign img_loading = 'lazy'
+            if forloop.first
+              assign img_class = img_class | append: ' product-shuffle__img--active'
+              assign img_loading = 'eager'
+            endif
+          %}
+          {{
+            image
+            | image_url: width: 1200
+            | image_tag: widths: widths, class: img_class, sizes: sizes, loading: img_loading, alt: product.title
+          }}
+        {%- endfor -%}
+      </div>
+    </a>
+
+    {%- if product.available == false or product.compare_at_price > product.price -%}
+      <div
+        class="product-badges product-badges--{{ settings.badge_position }}"
+        style="
+          --badge-border-radius: {{ settings.badge_corner_radius }}px;
+          --badge-font-family: var(--font-{{ settings.badge_font_family }}--family);
+          --badge-font-weight: var(--font-{{ settings.badge_font_family }}--weight);
+          --badge-text-transform: {{ settings.badge_text_transform }};
+        "
+      >
+        <div
+          class="
+            product-badges__badge product-badges__badge--rectangle
+            {% if product.available == false %} color-custom-badge-sold-out{% elsif product.compare_at_price > product.price %} color-custom-badge-sale{% endif %}
+          "
+        >
+          {%- if product.available == false -%}
+            {{ 'content.product_badge_sold_out' | t }}
+          {%- elsif product.compare_at_price > product.price -%}
+            {{ 'content.product_badge_sale' | t }}
+          {%- endif -%}
+        </div>
+      </div>
+    {%- endif -%}
+  </div>
+
+  {% render 'product-badges-styles' %}
+{%- elsif product != blank -%}
+  {% comment %} Product with no images — fall back to the stock gallery so nothing looks broken. {% endcomment %}
+  {% render 'card-gallery' %}
+{%- else -%}
+  {% comment %} Theme-editor placeholder state (no product bound). {% endcomment %}
+  <div class="card-gallery" style="--gallery-aspect-ratio: {{ ratio }};" {{ block.shopify_attributes }}>
+    <div class="resource-image resource-image--placeholder" style="aspect-ratio: {{ ratio }};">
+      <div class="resource-image__image">
+        {{ 'product-apparel-1' | placeholder_svg_tag }}
+      </div>
+    </div>
+  </div>
+{%- endif -%}
+
+{% stylesheet %}
+  .product-shuffle {
+    position: relative;
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    border-radius: var(--product-corner-radius);
+  }
+
+  .product-shuffle__img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0;
+  }
+
+  .product-shuffle__img--active {
+    opacity: 1;
+  }
+
+  /* "match" — identical to the Shop by Category tile fade */
+  .product-shuffle--match .product-shuffle__img {
+    transition: opacity 1.2s ease;
+  }
+
+  /* "distinct" — slide-up + fade, different curve and rhythm */
+  .product-shuffle--distinct .product-shuffle__img {
+    transform: translateY(10px);
+    transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+      transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .product-shuffle--distinct .product-shuffle__img--active {
+    transform: translateY(0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .product-shuffle__img {
+      transition: none;
+      transform: none;
+    }
+  }
+{% endstylesheet %}
+
+{% javascript %}
+  (function () {
+    if (window.__productShuffleInit) return;
+    window.__productShuffleInit = true;
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    var start = function () {
+      document.querySelectorAll('.product-shuffle').forEach(function (tile) {
+        if (tile.dataset.shuffleReady === '1') return;
+        var images = tile.querySelectorAll('.product-shuffle__img');
+        if (images.length < 2) return;
+        tile.dataset.shuffleReady = '1';
+
+        var intervalMs = parseInt(tile.dataset.rotationMs, 10) || 4000;
+        var current = 0;
+        // Stagger each card's start so a whole row doesn't flip in unison.
+        var startDelay = Math.random() * intervalMs;
+
+        setTimeout(function () {
+          setInterval(function () {
+            var next = (current + 1) % images.length;
+            images[current].classList.remove('product-shuffle__img--active');
+            images[next].classList.add('product-shuffle__img--active');
+            current = next;
+          }, intervalMs);
+        }, startDelay);
+      });
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start);
+    } else {
+      start();
+    }
+  })();
+{% endjavascript %}
+
+{% schema %}
+{
+  "name": "Product image shuffle",
+  "tag": null,
+  "settings": [
+    {
+      "type": "paragraph",
+      "content": "Cross-fades through this product's own photos, live. Homepage New Arrivals / Shop the Full Collection only."
+    },
+    {
+      "type": "select",
+      "id": "variant",
+      "label": "Effect",
+      "options": [
+        { "value": "match", "label": "Match Shop by Category (fade)" },
+        { "value": "distinct", "label": "Distinct (slide + fade)" }
+      ],
+      "default": "match"
+    },
+    {
+      "type": "select",
+      "id": "image_ratio",
+      "label": "t:settings.aspect_ratio",
+      "options": [
+        { "value": "adapt", "label": "t:options.auto" },
+        { "value": "portrait", "label": "t:options.portrait" },
+        { "value": "square", "label": "t:options.square" },
+        { "value": "landscape", "label": "t:options.landscape" }
+      ],
+      "default": "portrait"
+    },
+    {
+      "type": "range",
+      "id": "max_images",
+      "label": "Max photos to rotate through",
+      "min": 2,
+      "max": 8,
+      "step": 1,
+      "default": 5
+    },
+    {
+      "type": "range",
+      "id": "rotation_seconds",
+      "label": "Seconds between photo changes",
+      "min": 2,
+      "max": 10,
+      "step": 1,
+      "unit": "s",
+      "default": 4
+    }
+  ]
+}
+{% endschema %}
