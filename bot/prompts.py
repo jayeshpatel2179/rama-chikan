@@ -431,6 +431,15 @@ MODEL_AGE_DESCRIPTIONS = {
         "dignified, elegant, well-presented — never frail, never comedic, "
         "never a caricature."
     ),
+    # Added for the 7-category expansion (2026-09) — used only when
+    # "Premium" is the sole audience-relevant category on a STANDARD-pose
+    # (Question 9) generation. This is distinct from PREMIUM_MODEL_SPEC
+    # below, which is the fixed editorial-model description used for the 8
+    # premium POSES (Question 10) regardless of which category was picked.
+    "premium": (
+        "Adult Indian woman aged 25-35, poised and elegant, medium-fair "
+        "complexion, natural minimal makeup."
+    ),
 }
 
 
@@ -438,20 +447,36 @@ def resolve_model_age_bucket(categories: list[str]) -> str:
     """Question 5's category answer -> MODEL_AGE bucket.
 
     "All three" is a deliberate special case that overrides the general
-    "Nani wins" rule below it — per the owner's spec, "For Nani" alongside
-    exactly one other category still generates the Nani version (that's the
-    audience most needing representation), but naming all three together
-    is its own distinct blended age instead.
+    "Nani wins" rule below it — per the owner's spec, "For Nani/Dadi"
+    alongside exactly one other AUDIENCE category still generates the Nani
+    version (that's the audience most needing representation), but naming
+    all three together is its own distinct blended age instead.
+
+    Non-audience categories (Kurtis, Kurti Sets, On Sale) never affect model
+    age — they're just "which nav tab", not "who's it for" — and are
+    ignored here entirely. "Premium" is the one exception: it has its own
+    age bucket (25-35), used only when no audience category was also
+    picked (an audience category always takes precedence, same "Nani wins"
+    logic as before the 7-category expansion).
     """
     cats = {c.strip().lower() for c in categories}
-    if {"for nani", "for mom", "for me"} <= cats:
+    # "for nani" kept as a legacy alias in case older stored drafts/tests
+    # still use the pre-rename wording.
+    has_nani = "for nani/dadi" in cats or "for nani" in cats
+    has_mom = "for mom" in cats
+    has_me = "for me" in cats
+    if has_nani and has_mom and has_me:
         return "all_three"
-    if "for nani" in cats:
+    if has_nani:
         return "nani"
-    if "for mom" in cats and "for me" in cats:
+    if has_mom and has_me:
         return "me_mom"
-    if "for mom" in cats:
+    if has_mom:
         return "mom"
+    if has_me:
+        return "me"
+    if "premium" in cats:
+        return "premium"
     return "me"
 
 
@@ -463,14 +488,31 @@ def _indefinite_article(word: str) -> str:
     return "an" if word[:1].lower() in "aeiou" else "a"
 
 
-def _listing_rule(listing_type: str, color: str) -> str:
+def _listing_rule(listing_type: str, color: str, has_pyjama_reference: bool = False) -> str:
     if listing_type == "kurti_pyjama_set":
         article = _indefinite_article(color)
-        return (
+        rule = (
             f"This listing is {article} {color} kurti with its matching "
             "pyjama, salwar, or palazzo, exactly as shown together in the "
             "raw reference photos. The model wears the full set."
         )
+        if has_pyjama_reference:
+            # PYJAMA_REFERENCE was supplied (bot/handlers/new_product.py's
+            # pyjama upload flow) — the real pyjama has its own fabric, cut
+            # and embroidery, different from the kurti's, so it must be
+            # rendered from that actual photo rather than guessed/matched
+            # to the kurti. This is a hard override, not a suggestion.
+            rule += (
+                " A SEPARATE real photo of the actual pyjama/bottom is also "
+                "supplied as its own reference image (PYJAMA_REFERENCE) — "
+                "render the pyjama/bottom to match that reference photo "
+                "EXACTLY: identical fabric, colour, cut, hem, and "
+                "embroidery. Do not invent the pyjama and do not reuse the "
+                "kurti's own fabric or embroidery for it — the pyjama "
+                "reference photo is the ground truth for the bottom, not "
+                "the kurti photos."
+            )
+        return rule
     return (
         f"This listing is the {color} kurti ONLY — the bottom is NOT part "
         "of what is being sold. The model still wears a bottom at all "
@@ -534,6 +576,7 @@ def build_pose_prompt(
     has_face_reference: bool,
     model_age: str,
     back_reference_description: str | None = None,
+    has_pyjama_reference: bool = False,
 ) -> str:
     pose = POSES[pose_id]
 
@@ -579,7 +622,7 @@ def build_pose_prompt(
         color=color,
         material=material,
         length_rule=length_rule,
-        listing_rule=_listing_rule(listing_type, color),
+        listing_rule=_listing_rule(listing_type, color, has_pyjama_reference),
         pose_id=pose.id,
         pose_label=pose.label,
         pose_description=pose.description,
@@ -593,5 +636,320 @@ def build_pose_prompt(
         cleanup_rule=GARMENT_CLEANUP,
         back_fidelity_block=back_fidelity_block,
         negative_prompt=negative_prompt,
+        output_spec=OUTPUT_SPEC,
+    )
+
+
+# =============================================================================
+# PREMIUM EDITORIAL POSES (Question 10, 2026-09) — a second, separate pose
+# library from the 11-pose POSES dict above. Selectable for ANY category,
+# not only a product tagged "Premium" in Question 5. Additive: nothing above
+# this line changes behaviour when Question 10 is skipped.
+# =============================================================================
+
+# --- Premium background sets (Part 5) --------------------------------------
+# 3 lettered sets — a separate namespace from BACKGROUND_PRESETS ("A"/"B"
+# above), never mixed with it. Locked once per product (like
+# BACKGROUND_PRESETS) but rotated A -> B -> C -> A across products instead
+# of just A/B, and tracked as its own persisted state key
+# (state.next_premium_background_set) so it doesn't perturb the standard
+# flow's A/B alternation.
+
+PREMIUM_BACKGROUND_SETS = {
+    "A": (
+        "Warm mustard-ochre textured plaster wall with soft tonal "
+        "variation. A large weathered terracotta pot with handles stands "
+        "on the left. On the right, three wooden picture frames of "
+        "different sizes lean against the wall, each displaying a framed "
+        "chikankari fabric swatch in deep jewel tones. The floor is "
+        "covered with a faded vintage Persian-style carpet in cream, red "
+        "and navy. Warm soft directional lighting with a gentle shadow on "
+        "the wall."
+    ),
+    "B": (
+        "Warm ochre and mustard walls with subtle vertical tonal banding. "
+        "A tall rounded archway forms the centre of the frame. Visible "
+        "through the arch: a carved light-wood chair with a red-gold "
+        "cushion, a small round wooden side table holding a few small "
+        "objects, and a muted patterned rug on the floor. Soft warm "
+        "lighting, shallow depth of field on the background."
+    ),
+    "C": (
+        "Warm mustard-yellow plaster wall with a wooden louvred shuttered "
+        "window, one shutter open, bright soft daylight streaming through. "
+        "Below the window, a built-in seat with a pale cream mattress and "
+        "pale cushions, plus one large round tufted bolster cushion in a "
+        "rich accent colour. A terracotta-toned plinth below the seat and "
+        "a woven rug on the floor in the foreground."
+    ),
+}
+
+
+def pick_premium_background_set() -> str:
+    """Call ONCE per product, only if that product generates at least one
+    premium pose. Every premium image for that product reuses this exact
+    literal set text (zero drift), per Part 5's locking rule — this
+    intentionally overrides any individual pose's own "suggested" set
+    (e.g. pose P4's text mentions Set B) so a whole product's premium shoot
+    reads as one consistent location, not a mix of rooms."""
+    return state.next_premium_background_set()
+
+
+# --- Premium model specification (Part 6) -----------------------------------
+# Fixed editorial-model description used for EVERY premium pose, regardless
+# of which Question 5 category the product belongs to — distinct from
+# MODEL_AGE_DESCRIPTIONS above, which only drives the 11 standard poses.
+
+PREMIUM_MODEL_SPEC = (
+    "Indian woman aged 25 to 35. Poised, confident, aspirational — an "
+    "editorial fashion model, not a basic catalogue model. Long dark brown "
+    "wavy hair worn loose, falling naturally over the shoulders. Polished "
+    "warm-toned makeup with defined brows, subtle warm eyeshadow, natural "
+    "lip. Calm assured expression. Styling: stacked oxidised silver bangles "
+    "or heavy silver kadas on one or both wrists, silver or oxidised jhumka "
+    "earrings, occasionally a statement ring. Embroidered or metallic "
+    "juttis, or barefoot for the floor-seated pose."
+)
+
+# A light variety knob layered on top of PREMIUM_MODEL_SPEC so different
+# products don't all get a visually identical editorial model, without
+# touching the hardcoded spec text itself or any individual pose's own
+# hair/jewelry description (Part 4's pose text is authoritative where it
+# specifies something explicitly).
+PREMIUM_SKIN_TONES = ["warm wheatish", "fair", "deep tan", "medium olive-toned"]
+PREMIUM_HAIR_TEXTURES = ["soft waves", "loose curls", "sleek straight-to-wavy"]
+
+
+def pick_premium_model_variation() -> dict:
+    """Call ONCE per product, only if that product generates at least one
+    premium pose. Fixed across every premium image of that product (same
+    convention as pick_product_identity for the standard flow)."""
+    return {
+        "skin_tone": random.choice(PREMIUM_SKIN_TONES),
+        "hair_texture": random.choice(PREMIUM_HAIR_TEXTURES),
+    }
+
+
+def _premium_model_identity(variation: dict, has_face_reference: bool) -> str:
+    if has_face_reference:
+        identity_clause = (
+            " The model's face, skin tone, hair, and jewellery must exactly "
+            "match the model shown in the additional reference image — this "
+            "is the same person, in the same accessories, just a different "
+            "pose. Never swap in a different face partway through this "
+            "product's premium photos."
+        )
+    else:
+        # First premium image of this product — no reference to lock to
+        # yet, but still explicitly told to look distinct from other
+        # products' premium shoots per Part 6 ("do not reuse the same
+        # woman across the premium catalogue").
+        identity_clause = (
+            " This is a NEW model for this product's premium shoot — do "
+            "not reuse the same face, features, or styling as any other "
+            "product's premium photoshoot."
+        )
+    return (
+        f"{PREMIUM_MODEL_SPEC} Skin tone for this shoot: {variation['skin_tone']}. "
+        f"Hair texture: {variation['hair_texture']}, styled as described in "
+        "the pose below." + identity_clause
+    )
+
+
+# --- The 8 premium poses (Part 4) -------------------------------------------
+
+
+@dataclass(frozen=True)
+class PremiumPose:
+    id: str
+    label: str
+    crop_type: str
+    background_hint: str  # documentation only — the locked per-product set
+    # (pick_premium_background_set) always wins over this suggestion; see
+    # its docstring.
+    description: str
+    reference_filename: str
+
+
+PREMIUM_POSES: dict[str, PremiumPose] = {
+    "P1": PremiumPose(
+        "P1", "Full-Length Standing, Styled Set", "full-length", "Set A",
+        "Model stands square to camera, full body head to feet, weight "
+        "even, feet close together. Both hands clasped loosely in front at "
+        "waist level. Chin level, calm confident expression, direct eye "
+        "contact. Long dark wavy hair loose, falling over both shoulders. "
+        "Stacked oxidised silver bangles on both wrists. Silver jhumka "
+        "earrings. Embroidered juttis.",
+        "premium_p1_fulllength_styled_set.png",
+    ),
+    "P2": PremiumPose(
+        "P2", "Waist-Up, Looking to the Side", "waist-up",
+        "Set A, wall only",
+        "Cropped from above the head to just below the hip. Body angled "
+        "slightly, head turned to look off-frame at roughly 45 degrees, "
+        "chin lifted a little, composed expression. Hair swept to one side "
+        "falling over one shoulder. One arm relaxed straight down, the "
+        "other slightly bent with fingers loose. Heavy oxidised silver "
+        "cuff bangles visible on both wrists.",
+        "premium_p2_waistup_looking_side.png",
+    ),
+    "P3": PremiumPose(
+        "P3", "Leaning on Wall, Hand in Hair", "waist-up / three-quarter torso",
+        "Set A or B, wall corner",
+        "Cropped from above the head to mid-torso. Model leans her "
+        "shoulder against a wall edge or pillar corner. One arm raised, "
+        "hand tucking hair behind the ear near the temple. Other arm "
+        "relaxed down, resting across the body. Direct gaze, soft "
+        "confident expression. Long silver jhumka earrings. Silver cuff "
+        "bangles. Warm directional light from one side casting a soft "
+        "shadow on the wall.",
+        "premium_p3_leaning_hand_in_hair.png",
+    ),
+    "P4": PremiumPose(
+        "P4", "Full-Length in Arched Doorway",
+        "full-length, architectural framing", "Set B",
+        "Model stands inside an arched doorway, full body in frame, "
+        "centred in the arch. Hands clasped in front at waist. Dupatta "
+        "draped over one shoulder falling to floor length. Calm direct "
+        "gaze. Behind her through the arch: a carved wooden chair with a "
+        "cushion, a small round wooden side table, a patterned rug. Soft "
+        "depth of field so the background furniture is gently blurred.",
+        "premium_p4_fulllength_archway.png",
+    ),
+    "P5": PremiumPose(
+        "P5", "Leaning on Pillar, Hands Clasped", "waist-up",
+        "Set B, pillar edge with warm gradient wall",
+        "Cropped from above the head to hip. Model stands beside and "
+        "leaning lightly against a pillar or wall edge that fills the left "
+        "or right third of the frame. Body angled, both hands clasped low "
+        "in front. Head straight or tilted very slightly, soft direct "
+        "gaze. Dupatta worn draped around the neck like a scarf. Long "
+        "silver jhumka earrings, heavy silver cuff bangles.",
+        "premium_p5_leaning_pillar_hands_clasped.png",
+    ),
+    "P6": PremiumPose(
+        "P6", "Reclining on Window Seat", "full-length horizontal composition",
+        "Set C",
+        "Full-length reclining shot. Model reclines along a built-in "
+        "window seat / daybed with pale cushions, upper body propped up "
+        "and leaning against a large round bolster cushion. Legs extended "
+        "along the seat, garment fabric spread out to show the full drape "
+        "and hem embroidery. One hand resting on the bolster, the other "
+        "relaxed. Direct gaze, relaxed confident expression. Wooden "
+        "shuttered window behind with bright daylight coming through. "
+        "Juttis placed on the floor in the foreground. Stacked bangles.",
+        "premium_p6_reclining_window_seat.png",
+    ),
+    "P7": PremiumPose(
+        "P7", "Seated Close-Up with Bolster Cushion", "three-quarter seated",
+        "Set C",
+        "Closer crop of the window seat scene, roughly from above the head "
+        "to mid-thigh. Model seated, one arm draped over the large round "
+        "bolster cushion in the foreground, body turned toward camera. "
+        "Head slightly tilted, direct gaze. Long hair falling forward over "
+        "one shoulder. Long silver jhumka earrings, stacked silver bangles "
+        "on the draped arm. Wooden shutters and warm wall behind.",
+        "premium_p7_seated_bolster_closeup.png",
+    ),
+    "P8": PremiumPose(
+        "P8", "Seated on Floor, Hand on Cheek", "full seated figure",
+        "Set A, floor level",
+        "Model seated on a vintage patterned carpet on the floor. Legs "
+        "folded to one side, one knee raised, barefoot with the other leg "
+        "extended. Right elbow rests on the raised knee with the hand "
+        "supporting the cheek. Left hand planted flat on the carpet behind "
+        "for support. Head tilted slightly, direct gaze, calm expression. "
+        "Garment spread across the floor showing hem and border "
+        "embroidery. Stacked oxidised silver bangles on both wrists, "
+        "jhumka earrings.",
+        "premium_p8_seated_floor_hand_on_cheek.png",
+    ),
+}
+
+
+def resolve_premium_pose_selection(pose_ids: list[str]) -> list[str]:
+    """Question 10's premium pose numbers (e.g. ["P1", "P6", "P8"]) -> the
+    validated, de-duplicated, order-preserved list of ids to generate.
+
+    Unlike resolve_pose_selection (the 11-pose standard library), there's no
+    eligibility gating here: none of the 8 premium poses require a bottom
+    garment or a back reference, and they're explicitly usable for ANY
+    category/listing type per the spec — so every requested id that's a
+    real premium pose is accepted as-is."""
+    selected: list[str] = []
+    for raw in pose_ids:
+        pid = raw.strip().upper()
+        if pid in PREMIUM_POSES and pid not in selected:
+            selected.append(pid)
+    return selected
+
+
+PREMIUM_MEGA_PROMPT_TEMPLATE = """\
+{safety_rules}
+
+MODEL: {model_identity}
+
+GARMENT: Photorealistic e-commerce fashion photo of the model wearing the \
+exact {color} kurti shown in the raw reference photos, made of {material}, \
+with the same chikankari embroidery detail, fabric texture, and {color} \
+colour faithfully reproduced. {length_rule}
+
+LISTING TYPE: {listing_rule}
+
+PREMIUM EDITORIAL POSE {pose_id} — {pose_label}: {pose_description}
+
+BACKGROUND (locked for this entire product, identical in every image): \
+{background}
+
+LIGHTING: {lighting}
+
+GARMENT PRESENTATION: {cleanup_rule}
+
+FIDELITY: Do not invent, guess, or mirror any part of the garment that is \
+not visible in the reference photos — render only what is actually shown \
+there.
+
+DO NOT INCLUDE ANY OF: {negative_prompt}
+
+OUTPUT: {output_spec}
+"""
+
+
+def build_premium_pose_prompt(
+    *,
+    pose_id: str,
+    color: str,
+    material: str,
+    kurti_length: str,
+    listing_type: str,
+    background_set: str,
+    model_variation: dict,
+    has_face_reference: bool,
+    has_pyjama_reference: bool = False,
+) -> str:
+    pose = PREMIUM_POSES[pose_id]
+
+    length_rule = (
+        "The kurti is SHORT length (hip to mid-thigh) — render the "
+        "proportions as a short kurti, not a long one."
+        if kurti_length == "short"
+        else "The kurti is LONG length (knee-length or longer) — render "
+        "the full correct length."
+    )
+
+    return PREMIUM_MEGA_PROMPT_TEMPLATE.format(
+        safety_rules=SAFETY_RULES,
+        model_identity=_premium_model_identity(model_variation, has_face_reference),
+        color=color,
+        material=material,
+        length_rule=length_rule,
+        listing_rule=_listing_rule(listing_type, color, has_pyjama_reference),
+        pose_id=pose.id,
+        pose_label=pose.label,
+        pose_description=pose.description,
+        background=PREMIUM_BACKGROUND_SETS[background_set],
+        lighting=LIGHTING,
+        cleanup_rule=GARMENT_CLEANUP,
+        negative_prompt=NEGATIVE_PROMPT,
         output_spec=OUTPUT_SPEC,
     )

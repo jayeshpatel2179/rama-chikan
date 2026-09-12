@@ -273,6 +273,12 @@ async def create_live_product(
     if is_bestseller:
         collection_ids.append(BESTSELLERS_COLLECTION_ID)
 
+    # De-duplicated, order preserved — e.g. "Kurtis" is both always-included
+    # above and a selectable Question 5 category, so it can legitimately
+    # show up twice in the raw list before this.
+    collection_ids = list(dict.fromkeys(collection_ids))
+    tile_collection_ids = list(dict.fromkeys(tile_collection_ids))
+
     await _add_to_collections(product["id"], collection_ids)
     await _publish_to_online_store(product["id"])
 

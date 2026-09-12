@@ -22,11 +22,18 @@ from bot.handlers.cancel import cancel
 
 logger = logging.getLogger(__name__)
 
-WAITING_FRONT_PHOTO, WAITING_BACK_PHOTO, WAITING_ANSWERS, CONFIRMING = range(4)
+(
+    WAITING_FRONT_PHOTO,
+    WAITING_BACK_PHOTO,
+    WAITING_PYJAMA_CHOICE,
+    WAITING_PYJAMA_PHOTO,
+    WAITING_ANSWERS,
+    CONFIRMING,
+) = range(6)
 
 # Photo intake is sequential, one at a time — the bot explicitly asks for
 # the FRONT photo first, waits for it, then explicitly asks for the BACK
-# photo and waits for that before moving on to the 9 questions. Replaces an
+# photo and waits for that before moving on to the 10 questions. Replaces an
 # earlier batch/debounce design (send several photos at once, guess which is
 # front/back by position) that turned out to hurt generation accuracy —
 # always sending both photos as explicit, individually-confirmed
@@ -53,6 +60,23 @@ _POSE_MENU_LABELS = {
 assert set(_POSE_MENU_LABELS) == set(prompts.POSES), "pose menu is out of sync with bot.prompts.POSES"
 _POSE_MENU = "\n".join(f"{n} = {label}" for n, label in _POSE_MENU_LABELS.items())
 
+# Short menu labels for Question 10 (premium editorial poses) — same
+# convention as _POSE_MENU_LABELS above, kept in sync with prompts.PREMIUM_POSES.
+_PREMIUM_POSE_MENU_LABELS = {
+    "P1": "Full-length standing, styled set",
+    "P2": "Waist-up, looking to the side",
+    "P3": "Leaning on wall, hand in hair",
+    "P4": "Full-length in arched doorway",
+    "P5": "Leaning on pillar, hands clasped",
+    "P6": "Reclining on window seat",
+    "P7": "Seated close-up with bolster cushion",
+    "P8": "Seated on floor, hand on cheek",
+}
+assert set(_PREMIUM_POSE_MENU_LABELS) == set(prompts.PREMIUM_POSES), (
+    "premium pose menu is out of sync with bot.prompts.PREMIUM_POSES"
+)
+_PREMIUM_POSE_MENU = "\n".join(f"{n} = {label}" for n, label in _PREMIUM_POSE_MENU_LABELS.items())
+
 _QUESTIONS_MESSAGE = (
     "A few quick questions — reply to all of them in ONE message:\n\n"
     "1. Material type (e.g. rayon, georgette, chikankari work)\n"
@@ -60,14 +84,26 @@ _QUESTIONS_MESSAGE = (
     "will show on the site as out of stock.\n"
     "3. Price (the real selling price, e.g. 1500)\n"
     "4. Discount % to display (e.g. 20%, or say \"none\")\n"
-    "5. Category — For Nani, For Mom, For Me (name more than one if it fits, "
-    "or say \"all three\")\n"
+    "5. Category — which collections should this go into? (name one or more)\n"
+    "   1 = Premium\n"
+    "   2 = Kurtis\n"
+    "   3 = Kurti Sets\n"
+    "   4 = For Nani/Dadi\n"
+    "   5 = For Mom\n"
+    "   6 = For Me\n"
+    "   7 = On Sale\n"
+    "   (On Sale is added automatically whenever question 4's discount is "
+    "above 0% — you don't need to pick it yourself, and it won't be added "
+    "if there's no discount.)\n"
     "6. Is this a best-selling kurti? (yes/no)\n"
     "7. Kurti length — short or long?\n"
     "8. What's in this listing — kurti + pyjama set, or kurti only?\n"
     "9. How many images, and which poses? Reply with pose numbers, e.g. "
     "\"1, 5, 3\" — or type \"all poses\" for all 11 — or just give a number "
-    "like \"4\" and I'll pick the best combination.\n" + _POSE_MENU
+    "like \"4\" and I'll pick the best combination.\n" + _POSE_MENU + "\n\n"
+    "10. Want premium editorial shots instead? Reply with premium pose "
+    "numbers (e.g. \"P1, P6, P8\"), or skip to use the standard poses from "
+    "question 9.\n" + _PREMIUM_POSE_MENU
 )
 
 _ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
@@ -141,6 +177,15 @@ async def prompt_for_front_photo(update: Update, context: ContextTypes.DEFAULT_T
     return WAITING_FRONT_PHOTO
 
 
+def _pyjama_choice_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Yes — I'll send the pyjama photo", callback_data=f"pyjama_yes:{session_id}")],
+            [InlineKeyboardButton("No — kurti only", callback_data=f"pyjama_no:{session_id}")],
+        ]
+    )
+
+
 async def receive_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     draft = context.chat_data.get("draft")
     if draft is None:
@@ -156,8 +201,11 @@ async def receive_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     draft["color"] = await ai.detect_color(draft["raw_photos"])
     draft.pop("active_task", None)
 
-    await update.message.reply_text(_QUESTIONS_MESSAGE)
-    return WAITING_ANSWERS
+    await update.message.reply_text(
+        "Does this listing include a pyjama?",
+        reply_markup=_pyjama_choice_keyboard(draft["session_id"]),
+    )
+    return WAITING_PYJAMA_CHOICE
 
 
 async def prompt_for_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -165,9 +213,60 @@ async def prompt_for_back_photo(update: Update, context: ContextTypes.DEFAULT_TY
     return WAITING_BACK_PHOTO
 
 
+async def pyjama_yes_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Send the pyjama photo.")
+    return WAITING_PYJAMA_PHOTO
+
+
+async def pyjama_no_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(_QUESTIONS_MESSAGE)
+    return WAITING_ANSWERS
+
+
+async def receive_pyjama_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # PYJAMA_REFERENCE — the real pyjama photo, kept separate from
+    # front_photo/back_photo (FRONT_REFERENCE/BACK_REFERENCE) so the
+    # generation pipeline (bot/image_gen.py) can attach it as its own
+    # reference image without confusing it for the kurti garment itself.
+    draft = context.chat_data.get("draft")
+    if draft is None:
+        return ConversationHandler.END
+
+    largest = update.message.photo[-1]
+    file = await context.bot.get_file(largest.file_id)
+    draft["pyjama_photo"] = bytes(await file.download_as_bytearray())
+
+    await update.message.reply_text("Got the pyjama photo.")
+    await update.message.reply_text(_QUESTIONS_MESSAGE)
+    return WAITING_ANSWERS
+
+
+async def prompt_for_pyjama_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Please send the pyjama photo to continue.")
+    return WAITING_PYJAMA_PHOTO
+
+
 async def photo_during_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Already have the photo(s) for this product — please answer the 9 questions above."
+        "Already have the photo(s) for this product — please answer the 10 questions above."
     )
     return WAITING_ANSWERS
 
@@ -183,7 +282,7 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         logger.exception("Failed to parse new-product answers")
         await update.message.reply_text(
-            "Couldn't read that — please reply with all 9 answers in one message."
+            "Couldn't read that — please reply with all 10 answers in one message."
         )
         return WAITING_ANSWERS
 
@@ -199,30 +298,44 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if invalid_sizes or not parsed["sizes"]:
         await update.message.reply_text(
             f"Not valid sizes: {', '.join(invalid_sizes) or '(none given)'}.\n"
-            f"Rama Chikan only sells: {', '.join(VALID_SIZES)}. Please resend all 9 answers."
+            f"Rama Chikan only sells: {', '.join(VALID_SIZES)}. Please resend all 10 answers."
         )
         return WAITING_ANSWERS
 
     if parsed["price"] <= 0:
-        await update.message.reply_text("Price must be a positive number — please resend all 9 answers.")
+        await update.message.reply_text("Price must be a positive number — please resend all 10 answers.")
         return WAITING_ANSWERS
 
     if not (0 <= parsed["discount_pct"] < 100):
-        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 9 answers.")
+        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 10 answers.")
         return WAITING_ANSWERS
 
     if not parsed["categories"]:
         await update.message.reply_text(
-            "Didn't catch a category — reply with For Nani, For Mom, and/or For Me "
-            "(please resend all 9 answers)."
+            "Didn't catch a category — reply with one or more of Premium, Kurtis, "
+            "Kurti Sets, For Nani/Dadi, For Mom, For Me, On Sale (please resend "
+            "all 10 answers)."
         )
         return WAITING_ANSWERS
+
+    # Normalize old/renamed wording the LLM might still pass through, then
+    # derive On Sale deterministically from the discount answer rather than
+    # trusting whatever the owner did or didn't type for question 5 — per
+    # spec, On Sale must never depend on the owner remembering to pick it,
+    # and must never appear when there's no discount, no exceptions.
+    _CATEGORY_RENAMES = {"for nani": "For Nani/Dadi", "kurtas": "Kurtis"}
+    categories = [
+        _CATEGORY_RENAMES.get(c.strip().lower(), c.strip()) for c in parsed["categories"]
+    ]
+    categories = [c for c in categories if c.lower() != "on sale"]
+    if parsed["discount_pct"] > 0:
+        categories.append("On Sale")
 
     draft["material"] = parsed["material"]
     draft["size_quantities"] = {s["size"]: s["quantity"] for s in parsed["sizes"]}
     draft["price"] = parsed["price"]
     draft["discount_pct"] = parsed["discount_pct"]
-    draft["categories"] = parsed["categories"]
+    draft["categories"] = categories
     draft["is_bestseller"] = parsed["is_bestseller"]
     draft["kurti_length"] = parsed["kurti_length"]
     draft["listing_type"] = parsed["listing_type"]
@@ -233,19 +346,26 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     selected, blocked = prompts.resolve_pose_selection(
         parsed["pose_request"], draft["listing_type"], bool(draft.get("back_photo"))
     )
-    if not selected and not blocked:
+    premium_selected = prompts.resolve_premium_pose_selection(parsed["premium_pose_numbers"])
+
+    if not selected and not premium_selected and not blocked:
         await update.message.reply_text(
             "Couldn't resolve any poses from that — reply with pose numbers "
             "like \"1, 5, 3\", \"all poses\", or a count like \"4\" for "
-            "question 9 (please resend all 9 answers)."
+            "question 9, and/or premium pose numbers like \"P1, P6\" for "
+            "question 10 (please resend all 10 answers)."
         )
         return WAITING_ANSWERS
 
     if blocked:
-        draft["pending_selected_poses"] = selected
+        # premium_selected poses are never blocked (see
+        # resolve_premium_pose_selection) — folded in here unconditionally
+        # so they still generate once the owner resolves the blocked
+        # standard poses below.
+        draft["pending_selected_poses"] = selected + premium_selected
         block_lines = "\n".join(f"- Pose {p}: {reason}" for p, reason in blocked)
         buttons = []
-        if selected:
+        if selected or premium_selected:
             buttons.append(
                 [InlineKeyboardButton(
                     "▶️ Proceed without these",
@@ -259,15 +379,16 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )]
         )
         msg = "Can't generate some of the poses you asked for:\n" + block_lines
-        if selected:
-            msg += f"\n\nThe rest ({', '.join(str(p) for p in selected)}) can still be generated."
+        remaining = selected + premium_selected
+        if remaining:
+            msg += f"\n\nThe rest ({', '.join(str(p) for p in remaining)}) can still be generated."
         else:
             msg += "\n\nNone of the poses you asked for can be generated as-is."
         msg += "\n\nProceed without the blocked ones, or resend?"
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
         return WAITING_ANSWERS
 
-    return await _generate_and_send_draft(update.message, context, draft, selected)
+    return await _generate_and_send_draft(update.message, context, draft, selected + premium_selected)
 
 
 async def proceed_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -282,7 +403,7 @@ async def proceed_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_reply_markup(reply_markup=None)
     selected = draft.pop("pending_selected_poses", [])
     if not selected:
-        await query.message.reply_text("Nothing to generate — resend the 9 answers with different poses.")
+        await query.message.reply_text("Nothing to generate — resend the 10 answers with different poses.")
         return WAITING_ANSWERS
     return await _generate_and_send_draft(query.message, context, draft, selected)
 
@@ -302,7 +423,7 @@ async def cancel_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, draft: dict, resolved_poses: list[int]) -> int:
+async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, draft: dict, resolved_poses: list) -> int:
     photo_word = "photo" if len(resolved_poses) == 1 else "photos"
     await message.reply_text(
         f"Generating {len(resolved_poses)} model {photo_word} "
@@ -314,6 +435,7 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
     try:
         images, generated_poses, queued_poses = await image_gen.generate_model_images(
             draft["raw_photos"], draft.get("front_photo"), draft.get("back_photo"),
+            draft.get("pyjama_photo"),
             draft["color"], draft["material"],
             draft["kurti_length"], draft["listing_type"], resolved_poses,
             draft["categories"],
@@ -339,7 +461,7 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
     except Exception:
         logger.exception("Image/description generation failed")
         await message.reply_text(
-            "Image generation failed — nothing was published. Send the 9 answers again to retry."
+            "Image generation failed — nothing was published. Send the 10 answers again to retry."
         )
         return WAITING_ANSWERS
     finally:
@@ -383,6 +505,7 @@ def _draft_caption(draft: dict) -> str:
         f"Length: {draft['kurti_length'].capitalize()}",
         "Listing: " + (
             "Kurti + Pyjama Set"
+            + (" (real pyjama reference photo used)" if draft.get("pyjama_photo") else "")
             if draft["listing_type"] == "kurti_pyjama_set"
             else "Kurti Only (bottom shown is styling reference, not included)"
         ),
@@ -404,12 +527,41 @@ def _draft_caption(draft: dict) -> str:
     return "\n".join(lines)
 
 
+# Telegram's sendMediaGroup rejects more than 10 items in one call ("Too
+# many messages to send as an album") — this is what broke once a product
+# generated more than 10 images (e.g. "all poses" alone is already 11, or
+# any standard+premium combination past 10). It also requires at least 2
+# items per call, so a single generated image can't go through
+# sendMediaGroup at all and is sent as a plain photo instead.
+_MAX_MEDIA_GROUP_SIZE = 10
+
+
+def _chunk_media(media: list) -> list[list]:
+    """Split into chunks of at most _MAX_MEDIA_GROUP_SIZE. Never leaves a
+    trailing chunk of exactly 1 item — borrows one back from the previous
+    chunk instead, since sendMediaGroup requires at least 2 per call."""
+    chunks: list[list] = []
+    remaining = list(media)
+    while len(remaining) > _MAX_MEDIA_GROUP_SIZE:
+        chunks.append(remaining[:_MAX_MEDIA_GROUP_SIZE])
+        remaining = remaining[_MAX_MEDIA_GROUP_SIZE:]
+    chunks.append(remaining)
+    if len(chunks) > 1 and len(chunks[-1]) == 1:
+        chunks[-1].insert(0, chunks[-2].pop())
+    return chunks
+
+
 async def _send_draft_preview(message, draft: dict) -> None:
-    media = [
-        InputMediaPhoto(io.BytesIO(img), filename=f"angle-{i}.png")
-        for i, img in enumerate(draft["generated_images"])
-    ]
-    await message.reply_media_group(media=media)
+    images = draft["generated_images"]
+    if len(images) == 1:
+        await message.reply_photo(photo=io.BytesIO(images[0]))
+    else:
+        media = [
+            InputMediaPhoto(io.BytesIO(img), filename=f"angle-{i}.png")
+            for i, img in enumerate(images)
+        ]
+        for chunk in _chunk_media(media):
+            await message.reply_media_group(media=chunk)
     await message.reply_text(
         _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"]), parse_mode="Markdown"
     )
@@ -517,6 +669,14 @@ def build_conversation_handler() -> ConversationHandler:
             WAITING_BACK_PHOTO: [
                 MessageHandler(filters.PHOTO, receive_back_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_back_photo),
+            ],
+            WAITING_PYJAMA_CHOICE: [
+                CallbackQueryHandler(pyjama_yes_tap, pattern="^pyjama_yes:"),
+                CallbackQueryHandler(pyjama_no_tap, pattern="^pyjama_no:"),
+            ],
+            WAITING_PYJAMA_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_pyjama_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_pyjama_photo),
             ],
             WAITING_ANSWERS: [
                 MessageHandler(filters.PHOTO, photo_during_answers),

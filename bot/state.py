@@ -35,3 +35,19 @@ def next_background_preset() -> str:
     state["last_background_preset"] = next_preset
     _save(state)
     return next_preset
+
+
+def next_premium_background_set() -> str:
+    """Call once per product, only when that product actually generates at
+    least one premium editorial pose (bot/prompts.py PREMIUM_BACKGROUND_SETS).
+    Rotates 'A' -> 'B' -> 'C' -> 'A' across DIFFERENT products, persisted
+    across restarts — a separate rotation and a separate state key from
+    next_background_preset() above, since the premium sets are a distinct
+    lettered namespace (3 sets, not 2) used only for the 8 premium poses."""
+    state = _load()
+    order = ["A", "B", "C"]
+    last = state.get("last_premium_background_set")
+    next_set = order[(order.index(last) + 1) % len(order)] if last in order else "A"
+    state["last_premium_background_set"] = next_set
+    _save(state)
+    return next_set

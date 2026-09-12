@@ -168,7 +168,10 @@ _ANSWER_PARSE_SCHEMA = {
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": ["For Nani", "For Mom", "For Me"],
+                        "enum": [
+                            "Premium", "Kurtis", "Kurti Sets", "For Nani/Dadi",
+                            "For Mom", "For Me", "On Sale",
+                        ],
                     },
                 },
                 "is_bestseller": {"type": "boolean"},
@@ -187,10 +190,17 @@ _ANSWER_PARSE_SCHEMA = {
                     "required": ["mode", "pose_numbers", "count"],
                     "additionalProperties": False,
                 },
+                "premium_pose_numbers": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"],
+                    },
+                },
             },
             "required": [
                 "material", "sizes", "price", "discount_pct", "categories", "is_bestseller",
-                "kurti_length", "listing_type", "pose_request",
+                "kurti_length", "listing_type", "pose_request", "premium_pose_numbers",
             ],
             "additionalProperties": False,
         },
@@ -199,9 +209,9 @@ _ANSWER_PARSE_SCHEMA = {
 
 
 async def parse_new_product_answers(text: str) -> dict:
-    """Extracts the 9 answers (material, sizes+qty, price, discount %,
+    """Extracts the 10 answers (material, sizes+qty, price, discount %,
     category/categories, bestseller, kurti length, listing type, pose
-    request) from one free-text reply like:
+    request, premium pose request) from one free-text reply like:
 
         rayon
         3 of XS / 1 of S
@@ -212,6 +222,7 @@ async def parse_new_product_answers(text: str) -> dict:
         short
         kurti + pyjama set
         1, 5, 3
+        skip
 
     Sizes must be normalized to the store's exact size codes: XS, S, M, L,
     XL, XXL, 3XL. discount_pct is 0 if no discount was mentioned. categories
@@ -228,21 +239,38 @@ async def parse_new_product_answers(text: str) -> dict:
     ("1, 5, 3" -> mode 'specific', pose_numbers [1,5,3]) or just a count
     ("4" -> mode 'count', count 4). The actual pose IDs to generate are
     resolved afterward by bot.prompts.resolve_pose_selection, not here —
-    this function only extracts what the owner typed."""
+    this function only extracts what the owner typed.
+
+    premium_pose_numbers captures Question 10's answer (the 8-pose premium
+    editorial menu, e.g. "P1, P6, P8") — empty if the owner skipped it or
+    said no/none. On Sale (categories) is NOT trusted from this extraction
+    for whether the product actually goes on sale — bot/handlers/new_product.py
+    derives that deterministically from discount_pct after parsing, per the
+    spec's "must not appear in On Sale under any circumstance" rule when
+    there's no discount."""
     prompt = (
-        "Extract structured answers from this shopkeeper's reply to 9 questions "
-        "(material, sizes with quantity, price, discount percent, "
+        "Extract structured answers from this shopkeeper's reply to 10 "
+        "questions (material, sizes with quantity, price, discount percent, "
         "category/categories, whether this is a bestseller, kurti length, "
-        "listing type, and a pose request). "
+        "listing type, a pose request, and a premium pose request). "
         "Normalize every size to one of exactly: XS, S, M, L, XL, XXL, 3XL. "
-        "If no discount is mentioned, discount_pct is 0. Each category must be "
-        "exactly 'For Nani', 'For Mom', or 'For Me' — the reply may name one, "
-        "two, or all three of them (e.g. 'nani and mom', 'all three', 'all "
-        "categories'); include every category the reply mentions, in the "
-        "categories array. is_bestseller is true only if the reply clearly "
-        "says yes/bestseller/best-selling for that question, false for "
-        "no/not mentioned. kurti_length must be exactly 'short' or 'long' based "
-        "on that answer. listing_type must be exactly 'kurti_pyjama_set' unless "
+        "If no discount is mentioned, discount_pct is 0. "
+        "For the 5th question (category): each category must be exactly one "
+        "of 'Premium', 'Kurtis', 'Kurti Sets', 'For Nani/Dadi', 'For Mom', "
+        "'For Me', or 'On Sale'. The reply may give these as numbers "
+        "(1=Premium, 2=Kurtis, 3=Kurti Sets, 4=For Nani/Dadi, 5=For Mom, "
+        "6=For Me, 7=On Sale) or as names, and may name one or several (e.g. "
+        "'1, 4', 'premium and for mom', 'nani and mom', 'all three', 'all "
+        "categories'). Treat 'For Nani' (without '/Dadi') and 'Kurtas' as the "
+        "same thing as 'For Nani/Dadi' and 'Kurtis' respectively — the store "
+        "renamed these tabs but the owner may still use the old names. "
+        "Include every category the reply mentions in the categories array; "
+        "don't add On Sale yourself just because a discount was given — only "
+        "include it if the owner's reply to question 5 actually names it. "
+        "is_bestseller is true only if the reply clearly says "
+        "yes/bestseller/best-selling for that question, false for no/not "
+        "mentioned. kurti_length must be exactly 'short' or 'long' based on "
+        "that answer. listing_type must be exactly 'kurti_pyjama_set' unless "
         "the reply clearly says kurti only / just the kurti / no pyjama in the "
         "listing for that question, in which case it's 'kurti_only'. "
         "For the 9th question (pose request): if the reply lists specific pose "
@@ -252,7 +280,12 @@ async def parse_new_product_answers(text: str) -> dict:
         "and pose_numbers to [1,2,3,4,5,6,7,8,9,10,11]. If the reply is just a "
         "single number with no list context (e.g. '4' meaning 'give me 4 "
         "images'), set mode to 'count' and count to that integer (pose_numbers "
-        "can be empty). Pose numbers are always between 1 and 11.\n\n"
+        "can be empty). Pose numbers are always between 1 and 11. "
+        "For the 10th question (premium pose request): if the reply names "
+        "specific premium poses (e.g. 'P1, P6, P8' or 'premium 1, 6, 8'), set "
+        "premium_pose_numbers to that list of strings in the form 'P1'..'P8'. "
+        "If the reply skips this question, says 'skip', 'none', or 'no', set "
+        "premium_pose_numbers to an empty list.\n\n"
         "Reply:\n" + text
     )
     response = await _client.chat.completions.create(
