@@ -289,6 +289,17 @@ def resolve_pose_selection(
     ineligible pose is simply skipped in favour of the next one in priority
     order without bothering the owner (nothing was explicitly asked for, so
     there's nothing to confirm).
+
+    A genuine 0 (either mode: "specific" with an empty pose_numbers list,
+    e.g. the owner declined Q9 with "no"/"none"/"skip" to use premium poses
+    only, OR mode: "count" with count 0 — bot.ai's LLM parse of a decline
+    isn't perfectly consistent about which of these two equivalent shapes
+    it emits, see 2026-09-16 fix) now genuinely means ZERO standard poses
+    in both branches — this function must never silently force a minimum
+    of 1. Whether that's fine depends entirely on the caller: it's fine if
+    the owner also picked premium poses, or explicitly meant to generate
+    nothing standard; bot/handlers/new_product.py is what tells the owner
+    "couldn't resolve any poses" if BOTH standard and premium end up empty.
     """
 
     def hard_block_reason(pose_id: int) -> str | None:
@@ -318,7 +329,10 @@ def resolve_pose_selection(
                 selected.append(pose_id)
         return selected, blocked
 
-    count = max(1, pose_request["count"])
+    # No forced floor — a genuine 0 (e.g. the owner declined Q9 to use
+    # premium poses only) must resolve to zero standard poses, not silently
+    # get bumped up to 1. Only guards against a nonsensical negative value.
+    count = max(0, pose_request["count"])
     selected = []
     for pose_id in DEFAULT_PRIORITY_ORDER:
         if len(selected) >= count:
