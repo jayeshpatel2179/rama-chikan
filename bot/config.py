@@ -20,6 +20,16 @@ SHOPIFY_CLIENT_SECRET = _require_env("SHOPIFY_CLIENT_SECRET")
 
 LOG_LEVEL = "INFO"
 
+# --- Instagram publishing (Part 5, 2026-09-16) -----------------------------
+# Upload-post credentials — not required at startup (mirrors the pattern in
+# the sibling ped-instacap-poster / pedtalks-insta-image bots, which this
+# integration is modeled on). Starts pointed at the SAME dummy test profile
+# those bots use, copied into .env directly rather than typed here — switch
+# to the live Rama Chikan profile later by changing only INSTAGRAM_PROFILE_NAME
+# in .env, no code edit needed.
+UPLOAD_POST_API_KEY = os.getenv("UPLOAD_POST_API_KEY")
+INSTAGRAM_PROFILE_NAME = os.getenv("INSTAGRAM_PROFILE_NAME")
+
 # --- Shopify catalog constants -------------------------------------------
 
 # Every product from Flow 1 is added to the store's main Kurtis collection

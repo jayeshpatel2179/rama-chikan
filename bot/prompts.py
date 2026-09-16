@@ -44,14 +44,15 @@ NEGATIVE_PROMPT = (
     "watermark, logo"
 )
 
-# Appended to NEGATIVE_PROMPT only for back-view poses (10/11) — added after
-# a real regression where the model took the FRONT's yoke/motif treatment
-# and applied it to the back instead of reproducing the actual back
-# reference. See BACK_VIEW_FIDELITY below, which is the paired positive-side
-# instruction for the same fix.
+# Appended to NEGATIVE_PROMPT only for back-view poses (standard 10/11,
+# premium P9/P10) — added after a real regression where the model took the
+# FRONT's yoke/motif treatment and applied it to the back instead of
+# reproducing the actual back reference. See BACK_VIEW_FIDELITY below, which
+# is the paired positive-side instruction for the same fix.
 BACK_VIEW_NEGATIVE_ADDITIONS = (
-    "invented yoke, added seam line, mirrored front embroidery, added "
-    "centre-back motifs, added sleeve motifs, embellished back"
+    "front yoke embroidery, mirrored front design, invented yoke panel, "
+    "added seam line, added centre-back motif cluster, front neckline on "
+    "back, added sleeve motifs, embellished back"
 )
 
 # Inserted into the prompt only for back-view poses. {back_reference_description}
@@ -135,6 +136,36 @@ class Pose:
     crop_type: str  # "full_length" | "waist_up" | "detail" | "bottom_only"
     requires_bottom: bool = False
     requires_back_reference: bool = False
+
+
+# --- Reference binding table (Part 2, 2026-09-16 front/back mixup fix) -----
+# The single hard source of truth for which ONE raw-photo reference a given
+# pose (standard int id or premium "Pxx" id) is allowed to use. Both
+# bot/image_gen.py's standard and premium generation branches read this
+# table directly to pick reference_images, instead of re-deriving
+# eligibility per-branch — this is what closes the gap that let a back pose
+# fall through to an undifferentiated photo pool (which could contain the
+# front photo) when back_photo happened to be unset. A back-facing pose must
+# NEVER receive the front image as its reference, blended or otherwise; this
+# table is what image_gen.py enforces that against, with a hard stop (see
+# image_gen.MissingReferenceError) rather than a silent substitution when
+# the bound reference is missing.
+REFERENCE_FRONT = "front"
+REFERENCE_BACK = "back"
+REFERENCE_PYJAMA = "pyjama"
+
+POSE_REFERENCE_BINDING: dict[int | str, str] = {
+    # Standard poses (Question 9)
+    1: REFERENCE_FRONT, 2: REFERENCE_FRONT, 3: REFERENCE_FRONT,
+    4: REFERENCE_PYJAMA, 5: REFERENCE_FRONT, 6: REFERENCE_PYJAMA,
+    7: REFERENCE_FRONT, 8: REFERENCE_FRONT, 9: REFERENCE_FRONT,
+    10: REFERENCE_BACK, 11: REFERENCE_BACK,
+    # Premium poses (Question 10)
+    "P1": REFERENCE_FRONT, "P2": REFERENCE_FRONT, "P3": REFERENCE_FRONT,
+    "P4": REFERENCE_FRONT, "P5": REFERENCE_FRONT, "P6": REFERENCE_FRONT,
+    "P7": REFERENCE_FRONT, "P8": REFERENCE_FRONT,
+    "P9": REFERENCE_BACK, "P10": REFERENCE_BACK, "P11": REFERENCE_FRONT,
+}
 
 
 POSES: dict[int, Pose] = {
@@ -756,7 +787,94 @@ def _premium_model_identity(variation: dict, has_face_reference: bool) -> str:
     )
 
 
-# --- The 8 premium poses (Part 4) -------------------------------------------
+# --- Premium micro-variation (Part 3, 2026-09-16) ---------------------------
+# The 11 premium poses stay HARDCODED — base pose, crop, framing and camera
+# angle never change. Only these layer on top, randomised per image, mirroring
+# the standard flow's pick_variation but with premium's own vocabulary and a
+# separate used-combo set (bot/image_gen.py tracks it independently from the
+# standard flow's). Explicitly NOT applied to the 11 standard poses — they
+# already have their own variation system above.
+
+PREMIUM_HAND_POSITIONS = [
+    "arm relaxed at the side",
+    "hand lightly at the neckline",
+    "hand resting at the hip",
+    "hands loosely clasped",
+    "fingers adjusting a bangle",
+    "arm slightly bent, fingers relaxed",
+]
+PREMIUM_HEAD_DIRECTIONS = [
+    "facing forward",
+    "turned slightly left",
+    "turned slightly right",
+    "tilted gently down",
+    "lifted slightly up",
+]
+PREMIUM_EYE_DIRECTIONS = [
+    "direct at the camera",
+    "looking off to the left",
+    "looking off to the right",
+    "cast downward",
+    "softly lowered",
+]
+PREMIUM_EXPRESSIONS = ["neutral composed", "a faint closed-lip smile", "a soft warm smile"]
+PREMIUM_JEWELRY_DETAILS = ["a single heavy kada", "stacked thin bangles", "a mixed bangle stack"]
+PREMIUM_JHUMKA_SIZES = [
+    "medium-sized jhumka earrings",
+    "large statement jhumka earrings",
+    "delicate small jhumka earrings",
+]
+
+
+def pick_premium_variation(used_combos: set) -> dict:
+    """Call once per premium image within a product. `used_combos` is a
+    set[tuple[str, str, str]] of (hand, head, eye) already used for this
+    product's PREMIUM images specifically — tracked separately from the
+    standard flow's used_gesture_combos, mutated in place. Guarantees no two
+    images of one product share the same (hand, head, gaze) combination."""
+    for _ in range(50):
+        hand = random.choice(PREMIUM_HAND_POSITIONS)
+        head = random.choice(PREMIUM_HEAD_DIRECTIONS)
+        eye = random.choice(PREMIUM_EYE_DIRECTIONS)
+        combo = (hand, head, eye)
+        if combo not in used_combos:
+            used_combos.add(combo)
+            break
+    else:
+        # Exhausted realistic combos — reuse rather than loop forever.
+        used_combos.add(combo)
+    return {
+        "hand": hand,
+        "head": head,
+        "eye": eye,
+        "expression": random.choice(PREMIUM_EXPRESSIONS),
+        "jewelry_detail": random.choice(PREMIUM_JEWELRY_DETAILS),
+        "jhumka_size": random.choice(PREMIUM_JHUMKA_SIZES),
+    }
+
+
+# --- Premium realism (Part 4, 2026-09-16) ------------------------------------
+# Appended only to the premium prompt/negative-prompt — never applied to the
+# 11 standard poses. Makes premium output read as a real studio photograph
+# rather than an obviously-generated image.
+
+PREMIUM_REALISM = (
+    "Shot on a full-frame camera with an 85mm portrait lens, natural depth "
+    "of field with soft background falloff. Realistic skin texture with "
+    "visible pores and natural imperfection — no plastic or over-smoothed "
+    "skin. Natural asymmetry in hair fall and fabric drape. Soft "
+    "directional key light with a real shadow falling on the wall. Natural "
+    "colour grade, no HDR, no oversaturation, no glow. Fabric behaves with "
+    "real weight: creases at the elbow, natural gathering at the waist."
+)
+
+PREMIUM_NEGATIVE_ADDITIONS = (
+    "plastic skin, airbrushed, CGI render, over-smoothed, artificial "
+    "lighting, uncanny symmetry, glossy skin, HDR look"
+)
+
+
+# --- The 11 premium poses (Part 4) -------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -769,6 +887,7 @@ class PremiumPose:
     # its docstring.
     description: str
     reference_filename: str
+    requires_back_reference: bool = False
 
 
 PREMIUM_POSES: dict[str, PremiumPose] = {
@@ -864,24 +983,80 @@ PREMIUM_POSES: dict[str, PremiumPose] = {
         "jhumka earrings.",
         "premium_p8_seated_floor_hand_on_cheek.png",
     ),
+    "P9": PremiumPose(
+        "P9", "Back Full-Length", "full-length", "locked premium set",
+        "Model faces fully away from camera, standing straight and "
+        "centred, full body head to feet in frame. Weight even, feet close "
+        "together, both arms relaxed straight down at the sides. Long dark "
+        "wavy hair worn loose, falling down the back, parted so the back "
+        "yoke embroidery stays visible. Stacked oxidised silver bangles "
+        "visible on one wrist at her side. Silver jhumka earrings catching "
+        "the light at the side of the head. Embroidered juttis on the "
+        "floor. The full back of the garment fills the frame: back yoke "
+        "motifs, sleeve cuff embroidery, hem border, and the bottom's "
+        "motifs and hem detail all clearly legible.",
+        "premium_p9_back_fulllength.png",
+        requires_back_reference=True,
+    ),
+    "P10": PremiumPose(
+        "P10", "Back Over-the-Shoulder", "waist-up, back three-quarter",
+        "locked premium set",
+        "Cropped from above the head to roughly hip level. Model's back is "
+        "toward camera, body angled slightly, head turned in soft profile "
+        "looking back over one shoulder with a calm, faint smile. Hair "
+        "swept to the opposite shoulder so the back neckline and upper "
+        "yoke embroidery stay exposed. One arm relaxed at the side, the "
+        "other slightly bent with fingers loose. Heavy oxidised silver "
+        "cuff bangles visible. Long silver jhumka earring in profile "
+        "against the jawline.",
+        "premium_p10_back_over_shoulder.png",
+        requires_back_reference=True,
+    ),
+    "P11": PremiumPose(
+        "P11", "Embroidery Close-Up", "detail / torso close-up",
+        "locked premium set, softly blurred",
+        "Tight crop from just below the nose down to hip level. The face "
+        "is deliberately cut above the lips — only the chin, jawline and "
+        "earrings are in frame. Body square or very slightly angled to "
+        "camera. The frame fills with the neckline yoke embroidery: motif "
+        "density, thread texture, stitch detail, fabric weave. Sleeve cuff "
+        "embroidery visible on both arms. Side slit visible at the hem "
+        "edge of the crop. One arm relaxed straight down, the other "
+        "slightly bent with a silver bangle at the wrist. Long silver "
+        "jhumka earrings hanging beside the jaw. Soft directional light "
+        "raking across the fabric so the embroidery casts subtle relief "
+        "shadow. Background softly blurred — the garment is the subject.",
+        "premium_p11_embroidery_closeup.png",
+    ),
 }
 
 
-def resolve_premium_pose_selection(pose_ids: list[str]) -> list[str]:
-    """Question 10's premium pose numbers (e.g. ["P1", "P6", "P8"]) -> the
-    validated, de-duplicated, order-preserved list of ids to generate.
+def resolve_premium_pose_selection(
+    pose_ids: list[str],
+    has_back_reference: bool,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Question 10's premium pose numbers (e.g. ["P1", "P6", "P9"]) -> the
+    validated, de-duplicated, order-preserved list of ids to generate, plus
+    any blocked ids with a reason (same shape as resolve_pose_selection).
 
-    Unlike resolve_pose_selection (the 11-pose standard library), there's no
-    eligibility gating here: none of the 8 premium poses require a bottom
-    garment or a back reference, and they're explicitly usable for ANY
-    category/listing type per the spec — so every requested id that's a
-    real premium pose is accepted as-is."""
+    None of the 11 premium poses require a bottom garment, and they're
+    explicitly usable for ANY category/listing type per the spec. P9/P10
+    (added 2026-09-16) DO require a back reference, same as standard poses
+    10/11 — never silently dropped here (the owner named it on purpose), so
+    a genuinely missing back reference is returned as blocked for the
+    caller to surface, exactly like resolve_pose_selection's specific mode."""
     selected: list[str] = []
+    blocked: list[tuple[str, str]] = []
     for raw in pose_ids:
         pid = raw.strip().upper()
-        if pid in PREMIUM_POSES and pid not in selected:
+        if pid not in PREMIUM_POSES or pid in selected:
+            continue
+        pose = PREMIUM_POSES[pid]
+        if pose.requires_back_reference and not has_back_reference:
+            blocked.append((pid, "no back-side raw reference photo was supplied"))
+        else:
             selected.append(pid)
-    return selected
+    return selected, blocked
 
 
 PREMIUM_MEGA_PROMPT_TEMPLATE = """\
@@ -898,6 +1073,9 @@ LISTING TYPE: {listing_rule}
 
 PREMIUM EDITORIAL POSE {pose_id} — {pose_label}: {pose_description}
 
+GESTURE FOR THIS IMAGE: {hand}; head {head}; eyes {eye}; expression: \
+{expression}; jewellery detail: {jewelry_detail}; {jhumka_size}.
+
 BACKGROUND (locked for this entire product, identical in every image): \
 {background}
 
@@ -908,6 +1086,8 @@ GARMENT PRESENTATION: {cleanup_rule}
 FIDELITY: Do not invent, guess, or mirror any part of the garment that is \
 not visible in the reference photos — render only what is actually shown \
 there.
+{back_fidelity_block}
+REALISM: {realism}
 
 DO NOT INCLUDE ANY OF: {negative_prompt}
 
@@ -924,8 +1104,10 @@ def build_premium_pose_prompt(
     listing_type: str,
     background_set: str,
     model_variation: dict,
+    variation: dict,
     has_face_reference: bool,
     has_pyjama_reference: bool = False,
+    back_reference_description: str | None = None,
 ) -> str:
     pose = PREMIUM_POSES[pose_id]
 
@@ -937,6 +1119,16 @@ def build_premium_pose_prompt(
         "the full correct length."
     )
 
+    negative_prompt = f"{NEGATIVE_PROMPT}, {PREMIUM_NEGATIVE_ADDITIONS}"
+    back_fidelity_block = ""
+    if pose.requires_back_reference:
+        negative_prompt = f"{negative_prompt}, {BACK_VIEW_NEGATIVE_ADDITIONS}"
+        back_fidelity_block = "\n" + BACK_VIEW_FIDELITY.format(
+            back_reference_description=back_reference_description
+            or "(no separate description available — rely on the back "
+            "reference image alone, and still follow every rule above.)"
+        ) + "\n"
+
     return PREMIUM_MEGA_PROMPT_TEMPLATE.format(
         safety_rules=SAFETY_RULES,
         model_identity=_premium_model_identity(model_variation, has_face_reference),
@@ -947,9 +1139,17 @@ def build_premium_pose_prompt(
         pose_id=pose.id,
         pose_label=pose.label,
         pose_description=pose.description,
+        hand=variation["hand"],
+        head=variation["head"],
+        eye=variation["eye"],
+        expression=variation["expression"],
+        jewelry_detail=variation["jewelry_detail"],
+        jhumka_size=variation["jhumka_size"],
         background=PREMIUM_BACKGROUND_SETS[background_set],
         lighting=LIGHTING,
         cleanup_rule=GARMENT_CLEANUP,
-        negative_prompt=NEGATIVE_PROMPT,
+        back_fidelity_block=back_fidelity_block,
+        realism=PREMIUM_REALISM,
+        negative_prompt=negative_prompt,
         output_spec=OUTPUT_SPEC,
     )

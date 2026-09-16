@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-from bot import ai, image_gen, prompts, shopify_client
+from bot import ai, image_gen, instagram, prompts, shopify_client
 from bot.config import VALID_SIZES
 from bot.handlers.cancel import cancel
 
@@ -71,6 +71,9 @@ _PREMIUM_POSE_MENU_LABELS = {
     "P6": "Reclining on window seat",
     "P7": "Seated close-up with bolster cushion",
     "P8": "Seated on floor, hand on cheek",
+    "P9": "Back full-length",
+    "P10": "Back over-the-shoulder",
+    "P11": "Embroidery close-up",
 }
 assert set(_PREMIUM_POSE_MENU_LABELS) == set(prompts.PREMIUM_POSES), (
     "premium pose menu is out of sync with bot.prompts.PREMIUM_POSES"
@@ -102,11 +105,13 @@ _QUESTIONS_MESSAGE = (
     "\"1, 5, 3\" — or type \"all poses\" for all 11 — or just give a number "
     "like \"4\" and I'll pick the best combination.\n" + _POSE_MENU + "\n\n"
     "10. Want premium editorial shots instead? Reply with premium pose "
-    "numbers (e.g. \"P1, P6, P8\"), or skip to use the standard poses from "
-    "question 9.\n" + _PREMIUM_POSE_MENU
+    "numbers (e.g. \"P1, P6, P9\"), or skip to use the standard poses from "
+    "Q9.\n" + _PREMIUM_POSE_MENU + "\n\nAlso accept \"all premium\" to "
+    "generate all 11."
 )
 
 _ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
+_ALL_PREMIUM_RE = re.compile(r"\ball\s+premium\b", re.I)
 
 # The ready-to-post draft (generated images + description, sitting in memory
 # waiting for a GO LIVE tap) expires 10 minutes after it's generated. GO LIVE
@@ -125,14 +130,42 @@ def _draft_expired(draft: dict) -> bool:
     return ready_at is not None and (time.monotonic() - ready_at) > DRAFT_TTL_SECONDS
 
 
-def _draft_keyboard(session_id: str) -> InlineKeyboardMarkup:
+def _draft_keyboard(session_id: str, draft: dict) -> InlineKeyboardMarkup:
+    """Four independent buttons (Part 6, 2026-09-16). GO LIVE — SHOPIFY and
+    GO LIVE — INSTAGRAM are independent: pressing one never disables or
+    consumes the other. Once a GO LIVE button succeeds it's relabeled with
+    a checkmark and routed to a no-op callback so it can't be double-fired
+    — the row itself is never removed, so the other platform stays
+    pressable. REGENERATE CAP & # and ABORT are always available."""
+    if draft.get("shopify_published"):
+        shopify_button = InlineKeyboardButton("✅ Live on Shopify", callback_data=f"noop:{session_id}")
+    else:
+        shopify_button = InlineKeyboardButton(
+            "🟢 GO LIVE — SHOPIFY", callback_data=f"go_live_shopify:{session_id}"
+        )
+
+    if draft.get("instagram_published"):
+        instagram_button = InlineKeyboardButton("✅ Posted on Instagram", callback_data=f"noop:{session_id}")
+    else:
+        instagram_button = InlineKeyboardButton(
+            "📸 GO LIVE — INSTAGRAM", callback_data=f"go_live_instagram:{session_id}"
+        )
+
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ GO LIVE", callback_data=f"go_live:{session_id}")],
-            [InlineKeyboardButton("🔁 Regenerate description", callback_data=f"regenerate_desc:{session_id}")],
+            [shopify_button, instagram_button],
+            [InlineKeyboardButton("🔁 REGENERATE CAP & #", callback_data=f"regen_caption:{session_id}")],
             [InlineKeyboardButton("❌ ABORT", callback_data=f"abort:{session_id}")],
         ]
     )
+
+
+async def noop_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Callback target for an already-done GO LIVE button — acknowledges
+    the tap without re-firing the action, per Part 6's "mark it as done...
+    so it cannot be double-fired." Stays in CONFIRMING; doesn't touch the draft."""
+    await update.callback_query.answer("Already done ✅")
+    return CONFIRMING
 
 
 async def _reply_dead_session(query) -> None:
@@ -286,13 +319,15 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return WAITING_ANSWERS
 
-    # Deterministic shortcut — don't rely solely on the LLM catching this.
+    # Deterministic shortcuts — don't rely solely on the LLM catching these.
     if _ALL_POSES_RE.search(text):
         parsed["pose_request"] = {
             "mode": "specific",
             "pose_numbers": list(prompts.POSES),
             "count": 0,
         }
+    if _ALL_PREMIUM_RE.search(text):
+        parsed["premium_pose_numbers"] = list(prompts.PREMIUM_POSES)
 
     invalid_sizes = [s["size"] for s in parsed["sizes"] if s["size"] not in VALID_SIZES]
     if invalid_sizes or not parsed["sizes"]:
@@ -346,7 +381,10 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     selected, blocked = prompts.resolve_pose_selection(
         parsed["pose_request"], draft["listing_type"], bool(draft.get("back_photo"))
     )
-    premium_selected = prompts.resolve_premium_pose_selection(parsed["premium_pose_numbers"])
+    premium_selected, premium_blocked = prompts.resolve_premium_pose_selection(
+        parsed["premium_pose_numbers"], bool(draft.get("back_photo"))
+    )
+    blocked = blocked + premium_blocked
 
     if not selected and not premium_selected and not blocked:
         await update.message.reply_text(
@@ -454,10 +492,21 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
         copy = await ai.generate_description(draft["color"], draft["material"], draft["listing_type"])
         draft["title"] = copy["title"]
         draft["description_html"] = copy["description_html"]
+        draft["instagram_caption"] = await ai.generate_instagram_caption(
+            images[0], draft["color"], draft["material"], draft["listing_type"]
+        )
         # Starts the 10-minute clock. setdefault, not assignment: this
         # function only ever runs once per draft (the initial generation),
         # but stays defensive against being called twice for the same draft.
         draft.setdefault("ready_at", time.monotonic())
+    except image_gen.MissingReferenceError as exc:
+        logger.warning("Missing reference photo for pose %s: %s", exc.pose_id, exc)
+        await message.reply_text(
+            f"Can't generate pose {exc.pose_id} — the {exc.reference_kind.upper()} "
+            "reference photo is missing. Send that photo and resend the 10 answers "
+            "to retry (nothing else was affected)."
+        )
+        return WAITING_ANSWERS
     except Exception:
         logger.exception("Image/description generation failed")
         await message.reply_text(
@@ -523,7 +572,20 @@ def _draft_caption(draft: dict) -> str:
     if draft.get("is_bestseller"):
         lines.append("⭐ Marked as bestseller")
     lines.append("")
-    lines.append("Nothing goes live until you tap GO LIVE.")
+    lines.append("— Instagram caption (posted with GO LIVE — INSTAGRAM) —")
+    lines.append(draft.get("instagram_caption", "(caption not generated)"))
+    lines.append("")
+    status_bits = []
+    if draft.get("shopify_published"):
+        status_bits.append(f"✅ Live on Shopify: {draft.get('shopify_url', '')}")
+    if draft.get("instagram_published"):
+        status_bits.append(
+            f"✅ Posted on Instagram: {draft.get('instagram_url') or '(link pending)'}"
+        )
+    if status_bits:
+        lines.extend(status_bits)
+        lines.append("")
+    lines.append("Nothing goes live until you tap a GO LIVE button.")
     return "\n".join(lines)
 
 
@@ -563,11 +625,14 @@ async def _send_draft_preview(message, draft: dict) -> None:
         for chunk in _chunk_media(media):
             await message.reply_media_group(media=chunk)
     await message.reply_text(
-        _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"]), parse_mode="Markdown"
+        _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"], draft), parse_mode="Markdown"
     )
 
 
-async def regenerate_description_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def regen_caption_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """REGENERATE CAP & # (Part 6) — regenerates ONLY the Instagram caption
+    and hashtags. Images, product description, price, sizes and categories
+    all stay untouched. Re-sends the draft with the new caption, per spec."""
     query = update.callback_query
     session_id = query.data.split(":", 1)[1]
     draft = _live_draft(context, session_id)
@@ -578,21 +643,23 @@ async def regenerate_description_tap(update: Update, context: ContextTypes.DEFAU
         await _reply_expired(query, context)
         return ConversationHandler.END
 
-    await query.answer("Rewriting description...")
-    copy = await ai.generate_description(
-        draft["color"], draft["material"], draft["listing_type"], regenerate=True
+    await query.answer("Rewriting caption...")
+    draft["instagram_caption"] = await ai.generate_instagram_caption(
+        draft["generated_images"][0], draft["color"], draft["material"], draft["listing_type"]
     )
-    draft["title"] = copy["title"]
-    draft["description_html"] = copy["description_html"]
 
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(
-        _draft_caption(draft), reply_markup=_draft_keyboard(session_id), parse_mode="Markdown"
+        _draft_caption(draft), reply_markup=_draft_keyboard(session_id, draft), parse_mode="Markdown"
     )
     return CONFIRMING
 
 
-async def go_live_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def go_live_shopify_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """GO LIVE — SHOPIFY (Part 6). Publishes to Shopify exactly as before —
+    unchanged logic. Independent of Instagram: does not touch it, and
+    doesn't clear the session, so GO LIVE — INSTAGRAM stays pressable
+    afterward (in either order)."""
     query = update.callback_query
     session_id = query.data.split(":", 1)[1]
     draft = _live_draft(context, session_id)
@@ -602,9 +669,11 @@ async def go_live_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if _draft_expired(draft):
         await _reply_expired(query, context)
         return ConversationHandler.END
+    if draft.get("shopify_published"):
+        await query.answer("Already live on Shopify ✅")
+        return CONFIRMING
 
     await query.answer()
-    await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text("Publishing to Shopify...")
 
     try:
@@ -629,17 +698,70 @@ async def go_live_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         logger.exception("Failed to publish product to Shopify")
         await query.message.reply_text(
             "Something went wrong publishing this to Shopify — nothing went live. "
-            "Tap GO LIVE again to retry, or ABORT to discard this draft."
+            "Tap GO LIVE — SHOPIFY again to retry, or ABORT to discard this draft."
         )
         return CONFIRMING
 
+    draft["shopify_published"] = True
+    draft["shopify_url"] = f"https://ramachikan.com/products/{product['handle']}"
+    await query.edit_message_reply_markup(reply_markup=_draft_keyboard(session_id, draft))
     await query.message.reply_text(
-        f"🟢 Live: *{product['title']}*\n"
-        f"https://ramachikan.com/products/{product['handle']}",
+        f"🟢 Live on Shopify: *{product['title']}*\n{draft['shopify_url']}",
         parse_mode="Markdown",
     )
-    context.chat_data.clear()
-    return ConversationHandler.END
+    return CONFIRMING
+
+
+async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """GO LIVE — INSTAGRAM (Part 6). Posts the first generated image plus
+    caption/hashtags via upload-post. Independent of Shopify: does not
+    touch it, and doesn't clear the session either way. Failures are
+    reported in Telegram and never leave instagram_published set unless the
+    post actually succeeded, so a failed attempt is always retryable."""
+    query = update.callback_query
+    session_id = query.data.split(":", 1)[1]
+    draft = _live_draft(context, session_id)
+    if draft is None:
+        await _reply_dead_session(query)
+        return ConversationHandler.END
+    if _draft_expired(draft):
+        await _reply_expired(query, context)
+        return ConversationHandler.END
+    if draft.get("instagram_published"):
+        await query.answer("Already posted on Instagram ✅")
+        return CONFIRMING
+
+    await query.answer()
+    await query.message.reply_text("Posting to Instagram...")
+
+    draft["active_task"] = asyncio.current_task()
+    try:
+        post_url = await instagram.post_first_image(
+            draft["generated_images"][0], draft["instagram_caption"]
+        )
+    except instagram.UploadPostError as exc:
+        logger.exception("Failed to publish product to Instagram")
+        await query.message.reply_text(
+            f"Something went wrong posting to Instagram — nothing was posted.\n{exc}\n"
+            "Tap GO LIVE — INSTAGRAM again to retry, or ABORT to discard this draft."
+        )
+        return CONFIRMING
+    except asyncio.CancelledError:
+        raise
+    finally:
+        draft.pop("active_task", None)
+
+    draft["instagram_published"] = True
+    draft["instagram_url"] = post_url
+    await query.edit_message_reply_markup(reply_markup=_draft_keyboard(session_id, draft))
+    if post_url:
+        await query.message.reply_text(f"📸 Posted to Instagram:\n{post_url}")
+    else:
+        await query.message.reply_text(
+            "📸 Posted to Instagram — Upload-Post confirmed it asynchronously, "
+            "so the direct link isn't available yet."
+        )
+    return CONFIRMING
 
 
 async def abort_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -653,7 +775,13 @@ async def abort_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
     who = update.effective_user.full_name if update.effective_user else "someone"
-    await query.message.reply_text(f"Aborted by {who} — nothing was published.")
+    already_done = []
+    if draft.get("shopify_published"):
+        already_done.append("Shopify")
+    if draft.get("instagram_published"):
+        already_done.append("Instagram")
+    note = f"already live on {', '.join(already_done)} before this" if already_done else "nothing was published"
+    await query.message.reply_text(f"Aborted by {who} — {note}.")
     context.chat_data.clear()
     return ConversationHandler.END
 
@@ -685,8 +813,10 @@ def build_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_answers),
             ],
             CONFIRMING: [
-                CallbackQueryHandler(go_live_tap, pattern="^go_live:"),
-                CallbackQueryHandler(regenerate_description_tap, pattern="^regenerate_desc:"),
+                CallbackQueryHandler(go_live_shopify_tap, pattern="^go_live_shopify:"),
+                CallbackQueryHandler(go_live_instagram_tap, pattern="^go_live_instagram:"),
+                CallbackQueryHandler(regen_caption_tap, pattern="^regen_caption:"),
+                CallbackQueryHandler(noop_tap, pattern="^noop:"),
                 CallbackQueryHandler(abort_tap, pattern="^abort:"),
             ],
         },

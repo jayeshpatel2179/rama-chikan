@@ -194,7 +194,10 @@ _ANSWER_PARSE_SCHEMA = {
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"],
+                        "enum": [
+                            "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8",
+                            "P9", "P10", "P11",
+                        ],
                     },
                 },
             },
@@ -241,8 +244,8 @@ async def parse_new_product_answers(text: str) -> dict:
     resolved afterward by bot.prompts.resolve_pose_selection, not here —
     this function only extracts what the owner typed.
 
-    premium_pose_numbers captures Question 10's answer (the 8-pose premium
-    editorial menu, e.g. "P1, P6, P8") — empty if the owner skipped it or
+    premium_pose_numbers captures Question 10's answer (the 11-pose premium
+    editorial menu, e.g. "P1, P6, P9") — empty if the owner skipped it or
     said no/none. On Sale (categories) is NOT trusted from this extraction
     for whether the product actually goes on sale — bot/handlers/new_product.py
     derives that deterministically from discount_pct after parsing, per the
@@ -282,8 +285,10 @@ async def parse_new_product_answers(text: str) -> dict:
         "images'), set mode to 'count' and count to that integer (pose_numbers "
         "can be empty). Pose numbers are always between 1 and 11. "
         "For the 10th question (premium pose request): if the reply names "
-        "specific premium poses (e.g. 'P1, P6, P8' or 'premium 1, 6, 8'), set "
-        "premium_pose_numbers to that list of strings in the form 'P1'..'P8'. "
+        "specific premium poses (e.g. 'P1, P6, P9' or 'premium 1, 6, 9'), set "
+        "premium_pose_numbers to that list of strings in the form 'P1'..'P11'. "
+        "If the reply says 'all premium' (meaning all 11 premium poses), set "
+        "premium_pose_numbers to ['P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','P11']. "
         "If the reply skips this question, says 'skip', 'none', or 'no', set "
         "premium_pose_numbers to an empty list.\n\n"
         "Reply:\n" + text
@@ -294,6 +299,74 @@ async def parse_new_product_answers(text: str) -> dict:
         response_format=_ANSWER_PARSE_SCHEMA,
     )
     return json.loads(response.choices[0].message.content)
+
+
+_INSTAGRAM_CAPTION_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "instagram_caption",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"caption": {"type": "string"}},
+            "required": ["caption"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def generate_instagram_caption(
+    first_image_bytes: bytes,
+    color: str,
+    material: str,
+    listing_type: str,
+) -> str:
+    """Writes the Instagram caption (Part 5, 2026-09-16) for the FIRST
+    generated image of a product only — upload-post doesn't support
+    carousels here, so there's only ever one image to caption per post.
+
+    Looks at the actual generated image (not just the text fields) so the
+    caption is grounded in what's actually shown, same convention as
+    describe_back_reference/detect_color above rather than writing blind
+    from the intake answers alone."""
+    garment_type = "kurti and pyjama set" if listing_type == "kurti_pyjama_set" else "kurti"
+    b64 = base64.b64encode(first_image_bytes).decode("ascii")
+    prompt = (
+        "You are the Instagram voice of Rama Chikan, a heritage Lucknowi "
+        "chikankari brand — three generations of hand embroidery craft. "
+        f"Write ONE Instagram caption for this {color} {garment_type} made "
+        f"of {material}, hand-embroidered with chikankari work, shown in "
+        "the attached photo.\n\n"
+        "Rules:\n"
+        "- 1 to 1.5 lines, maximum 2.5 lines.\n"
+        "- Fashion-forward tone matching this specific kurti: mention the "
+        "colour, the fabric, and the occasion it suits.\n"
+        "- Warm and aspirational, matching Rama Chikan's brand voice — "
+        "premium and rooted in heritage, never overhyped.\n"
+        "- No emoji spam — at most one or two.\n"
+        "- Must include #RamaChikanLucknow on every single post, plus 3 to "
+        "4 additional relevant hashtags mixing broad reach and niche "
+        "intent (e.g. #Chikankari #LucknowiChikankari #KurtiLove "
+        "#EthnicWear #HandEmbroidered — pick ones that actually fit this "
+        "piece, don't just reuse the examples verbatim every time).\n"
+        "- Put the hashtags at the end of the caption, space-separated.\n"
+        "- Do not wrap the caption in quotation marks."
+    )
+    response = await _client.chat.completions.create(
+        model=_VISION_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            }
+        ],
+        response_format=_INSTAGRAM_CAPTION_SCHEMA,
+    )
+    return json.loads(response.choices[0].message.content)["caption"].strip()
 
 
 async def generate_description(

@@ -1,7 +1,8 @@
 """On-model product photo generation via GPT Image 2.
 
 Generates one image per requested pose (bot/prompts.py POSES, the 11-pose
-library) on the SAME model. Consistency within one product is achieved by:
+standard library, and PREMIUM_POSES, the 11-pose premium library) on the
+SAME model. Consistency within one product is achieved by:
   - a fixed hair/jewelry/footwear identity chosen once per product
     (bot.prompts.pick_product_identity) and reused in every image's prompt
   - the first FRONT-facing generated image is then also passed back in as
@@ -9,13 +10,15 @@ library) on the SAME model. Consistency within one product is achieved by:
     pose, so the face itself never drifts either
   - one locked background preset per product (bot.prompts.pick_background_preset)
 
-Front vs. back garment reference is kept strictly separate: front-facing
-poses use only the front raw photo, back-facing poses (10/11) use only the
-back raw photo — never blended, and the front-posed face reference is never
-attached to a back-pose call either, since its rendered garment would bleed
-the front's embroidery/yoke into the back view. See bot/prompts.py's
-BACK_VIEW_FIDELITY and bot.ai.describe_back_reference for the rest of that
-fix.
+Front vs. back vs. pyjama garment reference is kept strictly separate, per
+bot.prompts.POSE_REFERENCE_BINDING — the single hard source of truth for
+which ONE raw photo a given pose may use. This module reads that table
+directly rather than re-deriving eligibility per-branch, and raises
+MissingReferenceError (never silently substitutes a different reference)
+when the bound photo wasn't supplied. This is the fix for a real regression
+where a back-facing pose ended up copying the front's embroidery/yoke
+treatment — see bot/prompts.py's BACK_VIEW_FIDELITY and
+bot.ai.describe_back_reference for the rest of that fix.
 
 IMAGE_GENERATION_CAP (bot/config.py) currently limits actual generation to
 the first N poses in the resolved selection — see the comment there. All
@@ -42,6 +45,55 @@ from bot.config import (
 )
 
 _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+
+class MissingReferenceError(Exception):
+    """Raised when a pose's bound reference photo (bot.prompts.
+    POSE_REFERENCE_BINDING) wasn't supplied. Per the front/back binding fix
+    (2026-09-16), a missing reference must STOP generation and ask the shop
+    owner for the photo — never silently fall back to a different/pooled
+    reference image."""
+
+    def __init__(self, pose_id: int | str, reference_kind: str):
+        self.pose_id = pose_id
+        self.reference_kind = reference_kind
+        super().__init__(
+            f"Pose {pose_id} needs the {reference_kind.upper()} reference "
+            "photo, which wasn't supplied."
+        )
+
+
+def _resolve_garment_reference(
+    pose_id: int | str,
+    front_photo: bytes | None,
+    back_photo: bytes | None,
+    pyjama_photo: bytes | None,
+    raw_photo_bytes: list[bytes],
+) -> list[bytes]:
+    """The ONE reference image list a pose's garment call may use, per
+    POSE_REFERENCE_BINDING. Never blends front/back — a back-bound pose
+    with no back_photo raises rather than substituting the front photo or
+    the undifferentiated raw pool."""
+    binding = prompts.POSE_REFERENCE_BINDING[pose_id]
+
+    if binding == prompts.REFERENCE_BACK:
+        if back_photo is None:
+            raise MissingReferenceError(pose_id, "back")
+        return [back_photo]
+
+    if binding == prompts.REFERENCE_PYJAMA:
+        # Real pyjama photo is the ground truth when supplied; otherwise
+        # the front photo (which shows the full set together for a
+        # kurti_pyjama_set listing) is the correct fallback — never the
+        # undifferentiated pool, and never the back photo.
+        if pyjama_photo is not None:
+            return [pyjama_photo]
+        if front_photo is not None:
+            return [front_photo]
+        return raw_photo_bytes
+
+    # REFERENCE_FRONT
+    return [front_photo] if front_photo is not None else raw_photo_bytes
 
 
 def _crop_to_exact_size(png_bytes: bytes) -> bytes:
@@ -130,42 +182,57 @@ async def generate_model_images(
     premium_model_variation: dict | None = None
     premium_face_reference: bytes | None = None
 
-    standard_pose_ids = [p for p in to_generate if isinstance(p, int)]
-
     # Resolved once per product (not per image) and reused for every back
-    # pose — this is the literal, ground-truth text description injected
-    # into the back-view prompt alongside the image (bot/prompts.py's
-    # BACK_VIEW_FIDELITY). Only fetched if a back photo actually exists and
-    # a back-facing pose was actually requested.
+    # pose, standard OR premium alike — this is the literal, ground-truth
+    # text description injected into the back-view prompt alongside the
+    # image (bot/prompts.py's BACK_VIEW_FIDELITY). Only fetched if a back
+    # photo actually exists and at least one back-facing pose (standard
+    # 10/11 or premium P9/P10) was actually requested.
+    def _pose_needs_back_reference(pid: int | str) -> bool:
+        if isinstance(pid, str):
+            return prompts.PREMIUM_POSES[pid].requires_back_reference
+        return prompts.POSES[pid].requires_back_reference
+
     back_reference_description: str | None = None
-    if back_photo is not None and any(
-        prompts.POSES[p].requires_back_reference for p in standard_pose_ids
-    ):
+    if back_photo is not None and any(_pose_needs_back_reference(p) for p in to_generate):
         back_reference_description = await ai.describe_back_reference(back_photo)
 
     has_pyjama_reference = listing_type == "kurti_pyjama_set" and pyjama_photo is not None
 
     results: list[bytes] = []
     face_reference: bytes | None = None
+    used_premium_gesture_combos: set = set()
 
     for pose_id in to_generate:
+        binding = prompts.POSE_REFERENCE_BINDING[pose_id]
+        garment_bytes = _resolve_garment_reference(
+            pose_id, front_photo, back_photo, pyjama_photo, raw_photo_bytes
+        )
+        reference_images = [io.BytesIO(b) for b in garment_bytes]
+        for buf in reference_images:
+            buf.name = "raw.png"
+
         if isinstance(pose_id, str):
             # --- Premium editorial pose (Question 10) ---------------------
             if premium_background_set is None:
                 premium_background_set = prompts.pick_premium_background_set()
             if premium_model_variation is None:
                 premium_model_variation = prompts.pick_premium_model_variation()
+            variation = prompts.pick_premium_variation(used_premium_gesture_combos)
 
-            garment_bytes = [front_photo] if front_photo is not None else raw_photo_bytes
-            reference_images = [io.BytesIO(b) for b in garment_bytes]
-            for buf in reference_images:
-                buf.name = "raw.png"
-            if has_pyjama_reference:
+            # PYJAMA_REFERENCE is only ever additive on top of a FRONT-bound
+            # pose (P1-P8/P11) — never attached to a back-bound pose (P9/P10).
+            pose_has_pyjama_reference = has_pyjama_reference and binding == prompts.REFERENCE_FRONT
+            if pose_has_pyjama_reference:
                 pyjama_buf = io.BytesIO(pyjama_photo)
                 pyjama_buf.name = "pyjama_reference.png"
                 reference_images.append(pyjama_buf)
 
-            use_face_reference = premium_face_reference is not None
+            # Never attach the premium face reference to a back-bound pose —
+            # same bleed-through reasoning as the standard branch below.
+            use_face_reference = (
+                premium_face_reference is not None and binding != prompts.REFERENCE_BACK
+            )
             if use_face_reference:
                 face_buf = io.BytesIO(premium_face_reference)
                 face_buf.name = "face_reference.png"
@@ -179,8 +246,10 @@ async def generate_model_images(
                 listing_type=listing_type,
                 background_set=premium_background_set,
                 model_variation=premium_model_variation,
+                variation=variation,
                 has_face_reference=use_face_reference,
-                has_pyjama_reference=has_pyjama_reference,
+                has_pyjama_reference=pose_has_pyjama_reference,
+                back_reference_description=back_reference_description,
             )
 
             response = await _client.images.edit(
@@ -194,29 +263,20 @@ async def generate_model_images(
             final_png = _crop_to_exact_size(raw_png)
             results.append(final_png)
 
-            if premium_face_reference is None:
+            # Only ever seed from a front-bound pose's output — a back-bound
+            # premium output shows no face, so it would be a useless (or
+            # actively confusing) reference for later premium poses.
+            if premium_face_reference is None and binding != prompts.REFERENCE_BACK:
                 premium_face_reference = raw_png
             continue
 
         # --- Standard pose (Question 9) --------------------------------
-        pose = prompts.POSES[pose_id]
         variation = prompts.pick_variation(used_gesture_combos)
 
-        if pose.requires_back_reference:
-            # BACK_REFERENCE only — never the front photo, never blended
-            # with it. See the docstring above for why.
-            garment_bytes = [back_photo] if back_photo is not None else raw_photo_bytes
-        else:
-            garment_bytes = [front_photo] if front_photo is not None else raw_photo_bytes
-
-        reference_images = [io.BytesIO(b) for b in garment_bytes]
-        for buf in reference_images:
-            buf.name = "raw.png"
-
-        # PYJAMA_REFERENCE, when supplied, is attached alongside the
-        # garment reference for every front-facing pose (never back views —
-        # those stay isolated to back_photo only, same rule as above).
-        pose_has_pyjama_reference = has_pyjama_reference and not pose.requires_back_reference
+        # PYJAMA_REFERENCE is only additive on top of a FRONT-bound pose —
+        # poses 4/6 are themselves PYJAMA-bound (see _resolve_garment_reference)
+        # so they never get it attached a second time here.
+        pose_has_pyjama_reference = has_pyjama_reference and binding == prompts.REFERENCE_FRONT
         if pose_has_pyjama_reference:
             pyjama_buf = io.BytesIO(pyjama_photo)
             pyjama_buf.name = "pyjama_reference.png"
@@ -228,7 +288,7 @@ async def generate_model_images(
         # Skip it for back poses entirely; hair/jewelry/footwear consistency
         # is already locked independently via the literal product_identity
         # text baked into every prompt (bot.prompts.build_pose_prompt).
-        use_face_reference = face_reference is not None and not pose.requires_back_reference
+        use_face_reference = face_reference is not None and binding != prompts.REFERENCE_BACK
         if use_face_reference:
             face_buf = io.BytesIO(face_reference)
             face_buf.name = "face_reference.png"
@@ -263,7 +323,7 @@ async def generate_model_images(
         # Only ever seed the face reference from a front-facing pose — a
         # back-view output shows no face, so it would be a useless (or
         # actively confusing) reference for later poses.
-        if face_reference is None and not pose.requires_back_reference:
+        if face_reference is None and binding != prompts.REFERENCE_BACK:
             face_reference = raw_png
 
     return results, to_generate, queued
