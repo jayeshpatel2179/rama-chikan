@@ -1,3 +1,4 @@
+import json
 import logging
 import mimetypes
 import time
@@ -234,6 +235,27 @@ async def create_live_product(
                 "value": resolved_material,
             }
         )
+
+    # Every size is ALWAYS created as a real variant below (0 quantity +
+    # DENY policy for sizes the owner didn't stock) so the product page can
+    # show "Sold out" instead of omitting the size entirely. That means
+    # Shopify's native storefront Size filter -- which matches on variant
+    # EXISTENCE, not stock -- can never actually narrow anything, since
+    # every product technically "has" every size. This metafield is the
+    # real, accurate list of which sizes are actually in stock right now;
+    # it's what the storefront's Size filter should be pointed at instead
+    # of (or in addition to) the native variant-option filter. Purely
+    # additive -- doesn't touch the variant-creation logic or the
+    # sold-out-badge behavior at all.
+    in_stock_sizes = [s for s in VALID_SIZES if size_quantities.get(s, 0) > 0]
+    metafields.append(
+        {
+            "namespace": "custom",
+            "key": "available_sizes",
+            "type": "list.single_line_text_field",
+            "value": json.dumps(in_stock_sizes),
+        }
+    )
 
     input_payload = {
         "title": title,
