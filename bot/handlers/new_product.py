@@ -572,7 +572,11 @@ def _draft_caption(draft: dict) -> str:
     if draft.get("is_bestseller"):
         lines.append("⭐ Marked as bestseller")
     lines.append("")
-    lines.append("— Instagram caption (posted with GO LIVE — INSTAGRAM) —")
+    lines.append(
+        "— Instagram caption (posted with all photos as a carousel via GO LIVE — INSTAGRAM) —"
+        if len(draft.get("generated_images", [])) > 1
+        else "— Instagram caption (posted with GO LIVE — INSTAGRAM) —"
+    )
     lines.append(draft.get("instagram_caption", "(caption not generated)"))
     lines.append("")
     status_bits = []
@@ -713,8 +717,9 @@ async def go_live_shopify_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """GO LIVE — INSTAGRAM (Part 6). Posts the first generated image plus
-    caption/hashtags via upload-post. Independent of Shopify: does not
+    """GO LIVE — INSTAGRAM (Part 6). Posts ALL generated images (as one
+    carousel when there are 2+, max 10) plus caption/hashtags via
+    upload-post. Independent of Shopify: does not
     touch it, and doesn't clear the session either way. Failures are
     reported in Telegram and never leave instagram_published set unless the
     post actually succeeded, so a failed attempt is always retryable."""
@@ -732,13 +737,16 @@ async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TY
         return CONFIRMING
 
     await query.answer()
-    await query.message.reply_text("Posting to Instagram...")
+    images = draft["generated_images"]
+    count = min(len(images), instagram.MAX_CAROUSEL_ITEMS)
+    await query.message.reply_text(
+        "Posting to Instagram..." if count == 1
+        else f"Posting {count} photos to Instagram as a carousel..."
+    )
 
     draft["active_task"] = asyncio.current_task()
     try:
-        post_url = await instagram.post_first_image(
-            draft["generated_images"][0], draft["instagram_caption"]
-        )
+        post_url = await instagram.post_images(images, draft["instagram_caption"])
     except instagram.UploadPostError as exc:
         logger.exception("Failed to publish product to Instagram")
         await query.message.reply_text(
@@ -754,6 +762,11 @@ async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TY
     draft["instagram_published"] = True
     draft["instagram_url"] = post_url
     await query.edit_message_reply_markup(reply_markup=_draft_keyboard(session_id, draft))
+    if len(images) > instagram.MAX_CAROUSEL_ITEMS:
+        await query.message.reply_text(
+            f"Note: Instagram carousels hold at most {instagram.MAX_CAROUSEL_ITEMS} photos, "
+            f"so only the first {instagram.MAX_CAROUSEL_ITEMS} of your {len(images)} were posted."
+        )
     if post_url:
         await query.message.reply_text(f"📸 Posted to Instagram:\n{post_url}")
     else:
