@@ -7,6 +7,7 @@ import time
 import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -132,7 +133,7 @@ def _draft_expired(draft: dict) -> bool:
 
 def _draft_keyboard(session_id: str, draft: dict) -> InlineKeyboardMarkup:
     """Four independent buttons (Part 6, 2026-09-16). GO LIVE — SHOPIFY and
-    GO LIVE — INSTAGRAM are independent: pressing one never disables or
+    Go IG + FB are independent: pressing one never disables or
     consumes the other. Once a GO LIVE button succeeds it's relabeled with
     a checkmark and routed to a no-op callback so it can't be double-fired
     — the row itself is never removed, so the other platform stays
@@ -145,10 +146,10 @@ def _draft_keyboard(session_id: str, draft: dict) -> InlineKeyboardMarkup:
         )
 
     if draft.get("instagram_published"):
-        instagram_button = InlineKeyboardButton("✅ Posted on Instagram", callback_data=f"noop:{session_id}")
+        instagram_button = InlineKeyboardButton("✅ Posted IG + FB", callback_data=f"noop:{session_id}")
     else:
         instagram_button = InlineKeyboardButton(
-            "📸 GO LIVE — INSTAGRAM", callback_data=f"go_live_instagram:{session_id}"
+            "📸 Go IG + FB", callback_data=f"go_live_instagram:{session_id}"
         )
 
     return InlineKeyboardMarkup(
@@ -573,9 +574,9 @@ def _draft_caption(draft: dict) -> str:
         lines.append("⭐ Marked as bestseller")
     lines.append("")
     lines.append(
-        "— Instagram caption (posted with all photos as a carousel via GO LIVE — INSTAGRAM) —"
+        "— IG/FB caption (posted with all photos as a carousel via Go IG + FB) —"
         if len(draft.get("generated_images", [])) > 1
-        else "— Instagram caption (posted with GO LIVE — INSTAGRAM) —"
+        else "— IG/FB caption (posted with Go IG + FB) —"
     )
     lines.append(draft.get("instagram_caption", "(caption not generated)"))
     lines.append("")
@@ -585,6 +586,10 @@ def _draft_caption(draft: dict) -> str:
     if draft.get("instagram_published"):
         status_bits.append(
             f"✅ Posted on Instagram: {draft.get('instagram_url') or '(link pending)'}"
+        )
+    if draft.get("facebook_published"):
+        status_bits.append(
+            f"✅ Posted on Facebook: {draft.get('facebook_url') or '(link pending)'}"
         )
     if status_bits:
         lines.extend(status_bits)
@@ -717,12 +722,16 @@ async def go_live_shopify_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """GO LIVE — INSTAGRAM (Part 6). Posts ALL generated images (as one
-    carousel when there are 2+, max 10) plus caption/hashtags via
-    upload-post. Independent of Shopify: does not
-    touch it, and doesn't clear the session either way. Failures are
-    reported in Telegram and never leave instagram_published set unless the
-    post actually succeeded, so a failed attempt is always retryable."""
+    """"Go IG + FB" (Part 6; Facebook added 2026-09-23). Posts ALL generated
+    images (as one carousel per platform when there are 2+, max 10 each)
+    plus caption/hashtags via upload-post, to Instagram AND Facebook in one
+    call. Independent of Shopify: does not touch it, and doesn't clear the
+    session either way. The two platforms are reported separately — one can
+    succeed while the other fails (e.g. the Facebook Page isn't connected in
+    Upload-Post yet) — and the button is only marked done (draft["instagram_published"])
+    if at least one platform actually posted, so a fully-failed attempt is
+    always retryable without risking a duplicate post on the platform that
+    already worked."""
     query = update.callback_query
     session_id = query.data.split(":", 1)[1]
     draft = _live_draft(context, session_id)
@@ -733,25 +742,25 @@ async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TY
         await _reply_expired(query, context)
         return ConversationHandler.END
     if draft.get("instagram_published"):
-        await query.answer("Already posted on Instagram ✅")
+        await query.answer("Already posted ✅")
         return CONFIRMING
 
     await query.answer()
     images = draft["generated_images"]
     count = min(len(images), instagram.MAX_CAROUSEL_ITEMS)
     await query.message.reply_text(
-        "Posting to Instagram..." if count == 1
-        else f"Posting {count} photos to Instagram as a carousel..."
+        "Posting to Instagram + Facebook..." if count == 1
+        else f"Posting {count} photos to Instagram + Facebook as a carousel..."
     )
 
     draft["active_task"] = asyncio.current_task()
     try:
-        post_url = await instagram.post_images(images, draft["instagram_caption"])
+        results = await instagram.post_images(images, draft["instagram_caption"])
     except instagram.UploadPostError as exc:
-        logger.exception("Failed to publish product to Instagram")
+        logger.exception("Failed to publish product to Instagram/Facebook")
         await query.message.reply_text(
-            f"Something went wrong posting to Instagram — nothing was posted.\n{exc}\n"
-            "Tap GO LIVE — INSTAGRAM again to retry, or ABORT to discard this draft."
+            f"Something went wrong posting — nothing was posted.\n{exc}\n"
+            "Tap Go IG + FB again to retry, or ABORT to discard this draft."
         )
         return CONFIRMING
     except asyncio.CancelledError:
@@ -759,21 +768,57 @@ async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TY
     finally:
         draft.pop("active_task", None)
 
-    draft["instagram_published"] = True
-    draft["instagram_url"] = post_url
-    await query.edit_message_reply_markup(reply_markup=_draft_keyboard(session_id, draft))
     if len(images) > instagram.MAX_CAROUSEL_ITEMS:
         await query.message.reply_text(
-            f"Note: Instagram carousels hold at most {instagram.MAX_CAROUSEL_ITEMS} photos, "
+            f"Note: each platform's carousel holds at most {instagram.MAX_CAROUSEL_ITEMS} photos, "
             f"so only the first {instagram.MAX_CAROUSEL_ITEMS} of your {len(images)} were posted."
         )
-    if post_url:
-        await query.message.reply_text(f"📸 Posted to Instagram:\n{post_url}")
+
+    def _report(label: str, emoji: str, r) -> str:
+        if r.success:
+            return f"{emoji} Posted to {label}:\n{r.url}" if r.url else (
+                f"{emoji} Posted to {label} — Upload-Post confirmed it, "
+                "but hasn't handed back the direct link yet."
+            )
+        if r.pending:
+            return (
+                f"⏳ {label} is still processing at Upload-Post — not confirmed posted yet. "
+                "Check the Upload-Post dashboard in a bit, or tap Go IG + FB again shortly."
+            )
+        text = f"❌ {label} post failed: {r.error}"
+        if label == "Facebook":
+            text += (
+                "\nIf this is the first attempt, check that the Rama Chikan Facebook "
+                "Page is connected to the Upload-Post profile."
+            )
+        return text
+
+    ig, fb = results["instagram"], results["facebook"]
+
+    await query.message.reply_text(_report("Instagram", "📸", ig))
+    if ig.success:
+        draft["instagram_published"] = True
+        draft["instagram_url"] = ig.url
+
+    await query.message.reply_text(_report("Facebook", "📘", fb))
+    if fb.success:
+        draft["facebook_published"] = True
+        draft["facebook_url"] = fb.url
+
+    if ig.success or fb.success:
+        # Telegram refuses an edit whose markup is byte-identical to what's
+        # already showing (BadRequest "Message is not modified") -- this is
+        # cosmetic only (the checkmark relabel), the actual posting result
+        # was already reported above via reply_text, so swallow it rather
+        # than crash the handler and leave the conversation in a broken
+        # state (see the 2026-09-23 bug report this fixed).
+        try:
+            await query.edit_message_reply_markup(reply_markup=_draft_keyboard(session_id, draft))
+        except BadRequest as exc:
+            if "not modified" not in str(exc).lower():
+                raise
     else:
-        await query.message.reply_text(
-            "📸 Posted to Instagram — Upload-Post confirmed it asynchronously, "
-            "so the direct link isn't available yet."
-        )
+        await query.message.reply_text("Nothing posted. Tap Go IG + FB again to retry.")
     return CONFIRMING
 
 
