@@ -7,7 +7,7 @@ import time
 import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -57,6 +57,8 @@ _POSE_MENU_LABELS = {
     9: "Waist-up, looking to the side",
     10: "Back full-length",
     11: "Back over-the-shoulder",
+    12: "Knee-length front (needs pose 1 also selected)",
+    13: "Knee-length back (needs pose 10 also selected)",
 }
 assert set(_POSE_MENU_LABELS) == set(prompts.POSES), "pose menu is out of sync with bot.prompts.POSES"
 _POSE_MENU = "\n".join(f"{n} = {label}" for n, label in _POSE_MENU_LABELS.items())
@@ -75,6 +77,8 @@ _PREMIUM_POSE_MENU_LABELS = {
     "P9": "Back full-length",
     "P10": "Back over-the-shoulder",
     "P11": "Embroidery close-up",
+    "P12": "Knee-length front (needs P1 also selected)",
+    "P13": "Knee-length back (needs P9 also selected)",
 }
 assert set(_PREMIUM_POSE_MENU_LABELS) == set(prompts.PREMIUM_POSES), (
     "premium pose menu is out of sync with bot.prompts.PREMIUM_POSES"
@@ -103,12 +107,15 @@ _QUESTIONS_MESSAGE = (
     "7. Kurti length — short or long?\n"
     "8. What's in this listing — kurti + pyjama set, or kurti only?\n"
     "9. How many images, and which poses? Reply with pose numbers, e.g. "
-    "\"1, 5, 3\" — or type \"all poses\" for all 11 — or just give a number "
-    "like \"4\" and I'll pick the best combination.\n" + _POSE_MENU + "\n\n"
+    "\"1, 5, 3\" — or type \"all poses\" for all 13 — or just give a number "
+    "like \"4\" and I'll pick the best combination. (Poses 12/13 are "
+    "knee-length crops of poses 1/10 — include 1 or 10 too if you want "
+    "them.)\n" + _POSE_MENU + "\n\n"
     "10. Want premium editorial shots instead? Reply with premium pose "
     "numbers (e.g. \"P1, P6, P9\"), or skip to use the standard poses from "
-    "Q9.\n" + _PREMIUM_POSE_MENU + "\n\nAlso accept \"all premium\" to "
-    "generate all 11."
+    "Q9. (P12/P13 are knee-length crops of P1/P9 — include P1 or P9 too if "
+    "you want them.)\n" + _PREMIUM_POSE_MENU + "\n\nAlso accept \"all "
+    "premium\" to generate all 13."
 )
 
 _ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
@@ -397,10 +404,11 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return WAITING_ANSWERS
 
     if blocked:
-        # premium_selected poses are never blocked (see
-        # resolve_premium_pose_selection) — folded in here unconditionally
-        # so they still generate once the owner resolves the blocked
-        # standard poses below.
+        # premium_selected only ever excludes poses resolve_premium_pose_selection
+        # itself blocked (missing back reference, or — since 2026-09-26 — a
+        # missing P1/P9 crop dependency for P12/P13) — folded in here
+        # unconditionally so the rest still generate once the owner resolves
+        # whatever's blocked below.
         draft["pending_selected_poses"] = selected + premium_selected
         block_lines = "\n".join(f"- Pose {p}: {reason}" for p, reason in blocked)
         buttons = []
@@ -607,12 +615,14 @@ def _draft_caption(draft: dict) -> str:
 _MAX_MEDIA_GROUP_SIZE = 10
 
 
-def _chunk_media(media: list) -> list[list]:
+def _chunk_media(items: list) -> list[list]:
     """Split into chunks of at most _MAX_MEDIA_GROUP_SIZE. Never leaves a
     trailing chunk of exactly 1 item — borrows one back from the previous
-    chunk instead, since sendMediaGroup requires at least 2 per call."""
+    chunk instead, since sendMediaGroup requires at least 2 per call. Works
+    on any list (raw (index, image_bytes) pairs, in _send_draft_preview's
+    case) — chunking only cares about length, not element type."""
     chunks: list[list] = []
-    remaining = list(media)
+    remaining = list(items)
     while len(remaining) > _MAX_MEDIA_GROUP_SIZE:
         chunks.append(remaining[:_MAX_MEDIA_GROUP_SIZE])
         remaining = remaining[_MAX_MEDIA_GROUP_SIZE:]
@@ -622,19 +632,66 @@ def _chunk_media(media: list) -> list[list]:
     return chunks
 
 
+# Added 2026-09-26 after a real production crash: uploading several freshly
+# generated images in one sendMediaGroup call hit a mid-upload dropped
+# connection (httpx.ReadError -> telegram.error.NetworkError) and the whole
+# draft preview was lost — even though every image had already been
+# generated at real OpenAI API cost. Retries only a genuine transient
+# network failure (NetworkError and its subclass TimedOut); anything else
+# (e.g. BadRequest) is a real error and is never retried, since retrying it
+# would just repeat the same failure.
+_NETWORK_RETRY_MAX_ATTEMPTS = 3
+_NETWORK_RETRY_DELAY_SECONDS = 2
+
+
+async def _send_with_network_retry(send_fn):
+    """send_fn: a zero-arg async callable that performs ONE send attempt and
+    builds any request payload (e.g. fresh io.BytesIO / InputMediaPhoto
+    objects) fresh each call — a failed attempt can leave a byte stream
+    partially consumed, so the payload must never be reused across
+    retries."""
+    last_exc: NetworkError | None = None
+    for attempt in range(1, _NETWORK_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return await send_fn()
+        except NetworkError as exc:
+            # python-telegram-bot's BadRequest is (surprisingly) a subclass
+            # of NetworkError, but it's a real, non-transient application
+            # error (bad payload, chat not found, etc.) — retrying it would
+            # just repeat the identical failure, so it's excluded here and
+            # re-raised immediately instead of going through the retry loop.
+            if isinstance(exc, BadRequest):
+                raise
+            last_exc = exc
+            if attempt < _NETWORK_RETRY_MAX_ATTEMPTS:
+                logger.warning(
+                    "Transient network error sending to Telegram (attempt %d/%d): %s",
+                    attempt, _NETWORK_RETRY_MAX_ATTEMPTS, exc,
+                )
+                await asyncio.sleep(_NETWORK_RETRY_DELAY_SECONDS)
+    raise last_exc
+
+
 async def _send_draft_preview(message, draft: dict) -> None:
     images = draft["generated_images"]
     if len(images) == 1:
-        await message.reply_photo(photo=io.BytesIO(images[0]))
+        await _send_with_network_retry(
+            lambda: message.reply_photo(photo=io.BytesIO(images[0]))
+        )
     else:
-        media = [
-            InputMediaPhoto(io.BytesIO(img), filename=f"angle-{i}.png")
-            for i, img in enumerate(images)
-        ]
-        for chunk in _chunk_media(media):
-            await message.reply_media_group(media=chunk)
-    await message.reply_text(
-        _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"], draft), parse_mode="Markdown"
+        for chunk in _chunk_media(list(enumerate(images))):
+            async def _send_chunk(chunk=chunk):
+                media = [
+                    InputMediaPhoto(io.BytesIO(img), filename=f"angle-{i}.png")
+                    for i, img in chunk
+                ]
+                return await message.reply_media_group(media=media)
+
+            await _send_with_network_retry(_send_chunk)
+    await _send_with_network_retry(
+        lambda: message.reply_text(
+            _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"], draft), parse_mode="Markdown"
+        )
     )
 
 

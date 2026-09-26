@@ -120,6 +120,35 @@ def _crop_to_exact_size(png_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+# Fraction of a full-length pose's frame height (measured from the top) that
+# reads as "head down to just below the knee" — an empirical approximation
+# (average knee-height-to-stature ratio for a standing adult), since there's
+# no pose-landmark detection in this pipeline to find the actual knee pixel.
+# Tune this one constant if Part 5 testing shows the crop line sits visibly
+# above or below the knee.
+_KNEE_LENGTH_KEEP_FRACTION = 0.77
+
+
+def _crop_knee_length(final_png: bytes) -> bytes:
+    """Poses 12/13 (bot.prompts.CROP_DEPENDENCY) — take an already-generated,
+    already-exact-size full-length pose image and reframe it to knee-length
+    by cropping the bottom portion off and re-applying _crop_to_exact_size,
+    which zooms the remaining crop back to fill the standard 1000x1250 output
+    exactly like every other pose's image. No new AI generation call."""
+    image = Image.open(io.BytesIO(final_png)).convert("RGB")
+    width, height = image.size
+    cropped = image.crop((0, 0, width, int(height * _KNEE_LENGTH_KEEP_FRACTION)))
+    out = io.BytesIO()
+    cropped.save(out, format="PNG")
+    return _crop_to_exact_size(out.getvalue())
+
+
+def _crop_source_pose(pose_id: int | str) -> int | str | None:
+    if isinstance(pose_id, str):
+        return prompts.PREMIUM_POSES[pose_id].crop_source_pose
+    return prompts.POSES[pose_id].crop_source_pose
+
+
 async def generate_model_images(
     raw_photo_bytes: list[bytes],
     front_photo: bytes | None,
@@ -199,11 +228,31 @@ async def generate_model_images(
 
     has_pyjama_reference = listing_type == "kurti_pyjama_set" and pyjama_photo is not None
 
-    results: list[bytes] = []
+    # Crop-derived poses (12/13, P12/P13 — bot.prompts.CROP_DEPENDENCY /
+    # PREMIUM_CROP_DEPENDENCY) must be processed AFTER their source pose has
+    # actually been generated, since they crop that exact output rather than
+    # generating anything themselves. resolve_pose_selection already
+    # guarantees the source pose is present in to_generate; this just orders
+    # the LOOP so the source runs first. The final `results` list is
+    # reassembled back into `to_generate`'s original order below, so this
+    # internal reordering never changes what order images get returned/
+    # uploaded — it only affects the order pose IDs are generated in.
+    generation_order = [p for p in to_generate if _crop_source_pose(p) is None] + [
+        p for p in to_generate if _crop_source_pose(p) is not None
+    ]
+    generated_by_id: dict[int | str, bytes] = {}
+
     face_reference: bytes | None = None
     used_premium_gesture_combos: set = set()
 
-    for pose_id in to_generate:
+    for pose_id in generation_order:
+        crop_source = _crop_source_pose(pose_id)
+        if crop_source is not None:
+            # Not a new generation — reframe the source pose's own output.
+            final_png = _crop_knee_length(generated_by_id[crop_source])
+            generated_by_id[pose_id] = final_png
+            continue
+
         binding = prompts.POSE_REFERENCE_BINDING[pose_id]
         garment_bytes = _resolve_garment_reference(
             pose_id, front_photo, back_photo, pyjama_photo, raw_photo_bytes
@@ -261,7 +310,7 @@ async def generate_model_images(
             )
             raw_png = base64.b64decode(response.data[0].b64_json)
             final_png = _crop_to_exact_size(raw_png)
-            results.append(final_png)
+            generated_by_id[pose_id] = final_png
 
             # Only ever seed from a front-bound pose's output — a back-bound
             # premium output shows no face, so it would be a useless (or
@@ -318,7 +367,7 @@ async def generate_model_images(
         )
         raw_png = base64.b64decode(response.data[0].b64_json)
         final_png = _crop_to_exact_size(raw_png)
-        results.append(final_png)
+        generated_by_id[pose_id] = final_png
 
         # Only ever seed the face reference from a front-facing pose — a
         # back-view output shows no face, so it would be a useless (or
@@ -326,4 +375,11 @@ async def generate_model_images(
         if face_reference is None and binding != prompts.REFERENCE_BACK:
             face_reference = raw_png
 
-    return results, to_generate, queued
+    # generation_order (not to_generate) drove the loop above, so a
+    # crop-derived pose's source is always generated first — reassemble back
+    # into the ORIGINAL requested order here, so the returned images (and
+    # therefore the Shopify upload order downstream, which uploads this list
+    # as-is) are completely unaffected by that internal reordering. Part 0.3
+    # of the 2026-09-26 spec: upload order/sequence must stay untouched.
+    ordered_results = [generated_by_id[pose_id] for pose_id in to_generate]
+    return ordered_results, to_generate, queued

@@ -1,7 +1,9 @@
 import base64
+import io
 import json
 
 from openai import AsyncOpenAI
+from PIL import Image
 
 from bot.config import OPENAI_API_KEY
 
@@ -12,6 +14,33 @@ _TEXT_MODEL = "gpt-5.6-luna"
 # photos (garment colour) — worth the accuracy here, everything else in the
 # flow is owner-entered rather than guessed.
 _VISION_MODEL = "gpt-5.6"
+
+# Cost optimization (2026-09-26) — vision-model cost scales with image
+# resolution, and NOT every vision call here needs full resolution to do its
+# job correctly. Applied ONLY to detect_color (dominant colour is a coarse,
+# low-frequency property, trivially readable at low resolution) and
+# generate_instagram_caption (pure marketing text, has zero effect on the
+# actual product photos). Deliberately NOT applied to describe_back_reference
+# — that call counts and locates fine embroidery motifs, and its output text
+# is fed directly into what the back-view POSE IMAGES actually draw
+# (prompts.BACK_VIEW_FIDELITY) — downsizing that one risks a real accuracy
+# loss in generated images, which is exactly what this change must not do.
+_VISION_ANALYSIS_MAX_DIMENSION = 512
+
+
+def _downscale_for_analysis(image_bytes: bytes) -> bytes:
+    """Shrinks a copy of the image for a coarse vision-analysis call only —
+    never touches the original bytes used anywhere else (image generation,
+    Shopify upload, Instagram posting all keep the full-resolution image)."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    width, height = image.size
+    longest = max(width, height)
+    if longest > _VISION_ANALYSIS_MAX_DIMENSION:
+        scale = _VISION_ANALYSIS_MAX_DIMENSION / longest
+        image = image.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+    out = io.BytesIO()
+    image.save(out, format="JPEG", quality=85)
+    return out.getvalue()
 
 _COLOR_SCHEMA = {
     "type": "json_schema",
@@ -35,7 +64,7 @@ async def detect_color(photo_bytes_list: list[bytes]) -> str:
         {"type": "text", "text": "What is the dominant colour of this garment?"}
     ]
     for photo_bytes in photo_bytes_list:
-        b64 = base64.b64encode(photo_bytes).decode("ascii")
+        b64 = base64.b64encode(_downscale_for_analysis(photo_bytes)).decode("ascii")
         content.append(
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
         )
@@ -196,7 +225,7 @@ _ANSWER_PARSE_SCHEMA = {
                         "type": "string",
                         "enum": [
                             "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8",
-                            "P9", "P10", "P11",
+                            "P9", "P10", "P11", "P12", "P13",
                         ],
                     },
                 },
@@ -244,7 +273,7 @@ async def parse_new_product_answers(text: str) -> dict:
     resolved afterward by bot.prompts.resolve_pose_selection, not here —
     this function only extracts what the owner typed.
 
-    premium_pose_numbers captures Question 10's answer (the 11-pose premium
+    premium_pose_numbers captures Question 10's answer (the 13-pose premium
     editorial menu, e.g. "P1, P6, P9") — empty if the owner skipped it or
     said no/none. On Sale (categories) is NOT trusted from this extraction
     for whether the product actually goes on sale — bot/handlers/new_product.py
@@ -279,8 +308,8 @@ async def parse_new_product_answers(text: str) -> dict:
         "For the 9th question (pose request): if the reply lists specific pose "
         "numbers (e.g. '1, 5, 3' or '1 5 3' or 'poses 2 and 7'), set mode to "
         "'specific' and pose_numbers to that list of integers (count can be 0). "
-        "If the reply says 'all poses' (meaning all 11), set mode to 'specific' "
-        "and pose_numbers to [1,2,3,4,5,6,7,8,9,10,11]. If the reply is just a "
+        "If the reply says 'all poses' (meaning all 13), set mode to 'specific' "
+        "and pose_numbers to [1,2,3,4,5,6,7,8,9,10,11,12,13]. If the reply is just a "
         "single number with no list context (e.g. '4' meaning 'give me 4 "
         "images'), set mode to 'count' and count to that integer (pose_numbers "
         "can be empty). If the reply DECLINES standard poses for this question "
@@ -288,12 +317,15 @@ async def parse_new_product_answers(text: str) -> dict:
         "premium poses from question 10 instead), set mode to 'specific' and "
         "pose_numbers to an empty list (count can be 0) — this means ZERO "
         "standard poses, not 'pick one for me'. Pose numbers are always "
-        "between 1 and 11. "
+        "between 1 and 13 (poses 12 and 13 are knee-length crops that only "
+        "work if the reply also includes pose 1 or pose 10 respectively — "
+        "extract exactly what the reply says either way, don't add or "
+        "remove poses yourself). "
         "For the 10th question (premium pose request): if the reply names "
         "specific premium poses (e.g. 'P1, P6, P9' or 'premium 1, 6, 9'), set "
-        "premium_pose_numbers to that list of strings in the form 'P1'..'P11'. "
-        "If the reply says 'all premium' (meaning all 11 premium poses), set "
-        "premium_pose_numbers to ['P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','P11']. "
+        "premium_pose_numbers to that list of strings in the form 'P1'..'P13'. "
+        "If the reply says 'all premium' (meaning all 13 premium poses), set "
+        "premium_pose_numbers to ['P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','P11','P12','P13']. "
         "If the reply skips this question, says 'skip', 'none', or 'no', set "
         "premium_pose_numbers to an empty list.\n\n"
         "Reply:\n" + text
@@ -336,7 +368,7 @@ async def generate_instagram_caption(
     describe_back_reference/detect_color above rather than writing blind
     from the intake answers alone."""
     garment_type = "kurti and pyjama set" if listing_type == "kurti_pyjama_set" else "kurti"
-    b64 = base64.b64encode(first_image_bytes).decode("ascii")
+    b64 = base64.b64encode(_downscale_for_analysis(first_image_bytes)).decode("ascii")
     prompt = (
         "You are the Instagram voice of Rama Chikan, a heritage Lucknowi "
         "chikankari brand — three generations of hand embroidery craft. "
@@ -365,7 +397,7 @@ async def generate_instagram_caption(
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             }
         ],
