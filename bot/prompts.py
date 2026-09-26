@@ -1213,16 +1213,22 @@ PREMIUM EDITORIAL POSE {pose_id} — {pose_label}: {pose_description}
 GESTURE FOR THIS IMAGE: {hand}; head {head}; eyes {eye}; expression: \
 {expression}; jewellery detail: {jewelry_detail}; {jhumka_size}.
 
-HAND PROP: the model holds a small, casual handful of 3 to 5 stems of \
-{flower}, all the same flower type, with their long green stems/stalks \
-visible, held loosely and naturally in whichever hand is free given the \
-gesture above — like flowers freshly picked or received, NOT a \
-florist-arranged bouquet and NOT wrapped in paper, cellophane, or ribbon. \
-If the gesture above already occupies both hands with a specific task \
-(for example resting on a cushion, supporting the cheek, or braced on the \
-floor for balance), let the stems rest loosely across the fingers of one \
-of those hands without changing its described position or task in any \
-other way.
+HAND PROP: the model holds the flowers in a relaxed, editorial way, \
+naturally near the chest — either cradling the blooms gently with one \
+hand resting just below the collarbone, or with both hands resting \
+together around the stems, whichever reads more natural for the gesture \
+above; vary this hand placement across the product's different poses the \
+way a real photoshoot would, while the flower type itself stays identical \
+in every image. This should read as a warm, natural, premium lifestyle/ \
+editorial photograph — not a plain product photo with a flower placed on \
+top. A small, casual handful of 3 to 5 stems of {flower}, all the same \
+flower type, with their long green stems/stalks visible, held loosely — \
+like flowers freshly picked or received, NOT a florist-arranged bouquet \
+and NOT wrapped in paper, cellophane, or ribbon. If the gesture above \
+already occupies both hands with a specific task (for example resting on \
+a cushion, supporting the cheek, or braced on the floor for balance), let \
+the stems rest loosely across the fingers of one of those hands without \
+changing its described position or task in any other way.
 
 BACKGROUND (locked for this entire product, identical in every image): \
 {background}
