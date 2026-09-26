@@ -7,7 +7,7 @@ import time
 import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -615,12 +615,14 @@ def _draft_caption(draft: dict) -> str:
 _MAX_MEDIA_GROUP_SIZE = 10
 
 
-def _chunk_media(media: list) -> list[list]:
+def _chunk_media(items: list) -> list[list]:
     """Split into chunks of at most _MAX_MEDIA_GROUP_SIZE. Never leaves a
     trailing chunk of exactly 1 item — borrows one back from the previous
-    chunk instead, since sendMediaGroup requires at least 2 per call."""
+    chunk instead, since sendMediaGroup requires at least 2 per call. Works
+    on any list (raw (index, image_bytes) pairs, in _send_draft_preview's
+    case) — chunking only cares about length, not element type."""
     chunks: list[list] = []
-    remaining = list(media)
+    remaining = list(items)
     while len(remaining) > _MAX_MEDIA_GROUP_SIZE:
         chunks.append(remaining[:_MAX_MEDIA_GROUP_SIZE])
         remaining = remaining[_MAX_MEDIA_GROUP_SIZE:]
@@ -630,19 +632,66 @@ def _chunk_media(media: list) -> list[list]:
     return chunks
 
 
+# Added 2026-09-26 after a real production crash: uploading several freshly
+# generated images in one sendMediaGroup call hit a mid-upload dropped
+# connection (httpx.ReadError -> telegram.error.NetworkError) and the whole
+# draft preview was lost — even though every image had already been
+# generated at real OpenAI API cost. Retries only a genuine transient
+# network failure (NetworkError and its subclass TimedOut); anything else
+# (e.g. BadRequest) is a real error and is never retried, since retrying it
+# would just repeat the same failure.
+_NETWORK_RETRY_MAX_ATTEMPTS = 3
+_NETWORK_RETRY_DELAY_SECONDS = 2
+
+
+async def _send_with_network_retry(send_fn):
+    """send_fn: a zero-arg async callable that performs ONE send attempt and
+    builds any request payload (e.g. fresh io.BytesIO / InputMediaPhoto
+    objects) fresh each call — a failed attempt can leave a byte stream
+    partially consumed, so the payload must never be reused across
+    retries."""
+    last_exc: NetworkError | None = None
+    for attempt in range(1, _NETWORK_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return await send_fn()
+        except NetworkError as exc:
+            # python-telegram-bot's BadRequest is (surprisingly) a subclass
+            # of NetworkError, but it's a real, non-transient application
+            # error (bad payload, chat not found, etc.) — retrying it would
+            # just repeat the identical failure, so it's excluded here and
+            # re-raised immediately instead of going through the retry loop.
+            if isinstance(exc, BadRequest):
+                raise
+            last_exc = exc
+            if attempt < _NETWORK_RETRY_MAX_ATTEMPTS:
+                logger.warning(
+                    "Transient network error sending to Telegram (attempt %d/%d): %s",
+                    attempt, _NETWORK_RETRY_MAX_ATTEMPTS, exc,
+                )
+                await asyncio.sleep(_NETWORK_RETRY_DELAY_SECONDS)
+    raise last_exc
+
+
 async def _send_draft_preview(message, draft: dict) -> None:
     images = draft["generated_images"]
     if len(images) == 1:
-        await message.reply_photo(photo=io.BytesIO(images[0]))
+        await _send_with_network_retry(
+            lambda: message.reply_photo(photo=io.BytesIO(images[0]))
+        )
     else:
-        media = [
-            InputMediaPhoto(io.BytesIO(img), filename=f"angle-{i}.png")
-            for i, img in enumerate(images)
-        ]
-        for chunk in _chunk_media(media):
-            await message.reply_media_group(media=chunk)
-    await message.reply_text(
-        _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"], draft), parse_mode="Markdown"
+        for chunk in _chunk_media(list(enumerate(images))):
+            async def _send_chunk(chunk=chunk):
+                media = [
+                    InputMediaPhoto(io.BytesIO(img), filename=f"angle-{i}.png")
+                    for i, img in chunk
+                ]
+                return await message.reply_media_group(media=media)
+
+            await _send_with_network_retry(_send_chunk)
+    await _send_with_network_retry(
+        lambda: message.reply_text(
+            _draft_caption(draft), reply_markup=_draft_keyboard(draft["session_id"], draft), parse_mode="Markdown"
+        )
     )
 
 
