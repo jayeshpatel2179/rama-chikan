@@ -57,6 +57,8 @@ _POSE_MENU_LABELS = {
     9: "Waist-up, looking to the side",
     10: "Back full-length",
     11: "Back over-the-shoulder",
+    12: "Knee-length front (needs pose 1 also selected)",
+    13: "Knee-length back (needs pose 10 also selected)",
 }
 assert set(_POSE_MENU_LABELS) == set(prompts.POSES), "pose menu is out of sync with bot.prompts.POSES"
 _POSE_MENU = "\n".join(f"{n} = {label}" for n, label in _POSE_MENU_LABELS.items())
@@ -75,6 +77,8 @@ _PREMIUM_POSE_MENU_LABELS = {
     "P9": "Back full-length",
     "P10": "Back over-the-shoulder",
     "P11": "Embroidery close-up",
+    "P12": "Knee-length front (needs P1 also selected)",
+    "P13": "Knee-length back (needs P9 also selected)",
 }
 assert set(_PREMIUM_POSE_MENU_LABELS) == set(prompts.PREMIUM_POSES), (
     "premium pose menu is out of sync with bot.prompts.PREMIUM_POSES"
@@ -103,12 +107,15 @@ _QUESTIONS_MESSAGE = (
     "7. Kurti length — short or long?\n"
     "8. What's in this listing — kurti + pyjama set, or kurti only?\n"
     "9. How many images, and which poses? Reply with pose numbers, e.g. "
-    "\"1, 5, 3\" — or type \"all poses\" for all 11 — or just give a number "
-    "like \"4\" and I'll pick the best combination.\n" + _POSE_MENU + "\n\n"
+    "\"1, 5, 3\" — or type \"all poses\" for all 13 — or just give a number "
+    "like \"4\" and I'll pick the best combination. (Poses 12/13 are "
+    "knee-length crops of poses 1/10 — include 1 or 10 too if you want "
+    "them.)\n" + _POSE_MENU + "\n\n"
     "10. Want premium editorial shots instead? Reply with premium pose "
     "numbers (e.g. \"P1, P6, P9\"), or skip to use the standard poses from "
-    "Q9.\n" + _PREMIUM_POSE_MENU + "\n\nAlso accept \"all premium\" to "
-    "generate all 11."
+    "Q9. (P12/P13 are knee-length crops of P1/P9 — include P1 or P9 too if "
+    "you want them.)\n" + _PREMIUM_POSE_MENU + "\n\nAlso accept \"all "
+    "premium\" to generate all 13."
 )
 
 _ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
@@ -397,10 +404,11 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return WAITING_ANSWERS
 
     if blocked:
-        # premium_selected poses are never blocked (see
-        # resolve_premium_pose_selection) — folded in here unconditionally
-        # so they still generate once the owner resolves the blocked
-        # standard poses below.
+        # premium_selected only ever excludes poses resolve_premium_pose_selection
+        # itself blocked (missing back reference, or — since 2026-09-26 — a
+        # missing P1/P9 crop dependency for P12/P13) — folded in here
+        # unconditionally so the rest still generate once the owner resolves
+        # whatever's blocked below.
         draft["pending_selected_poses"] = selected + premium_selected
         block_lines = "\n".join(f"- Pose {p}: {reason}" for p, reason in blocked)
         buttons = []

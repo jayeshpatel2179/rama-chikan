@@ -196,7 +196,7 @@ _ANSWER_PARSE_SCHEMA = {
                         "type": "string",
                         "enum": [
                             "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8",
-                            "P9", "P10", "P11",
+                            "P9", "P10", "P11", "P12", "P13",
                         ],
                     },
                 },
@@ -244,7 +244,7 @@ async def parse_new_product_answers(text: str) -> dict:
     resolved afterward by bot.prompts.resolve_pose_selection, not here —
     this function only extracts what the owner typed.
 
-    premium_pose_numbers captures Question 10's answer (the 11-pose premium
+    premium_pose_numbers captures Question 10's answer (the 13-pose premium
     editorial menu, e.g. "P1, P6, P9") — empty if the owner skipped it or
     said no/none. On Sale (categories) is NOT trusted from this extraction
     for whether the product actually goes on sale — bot/handlers/new_product.py
@@ -279,8 +279,8 @@ async def parse_new_product_answers(text: str) -> dict:
         "For the 9th question (pose request): if the reply lists specific pose "
         "numbers (e.g. '1, 5, 3' or '1 5 3' or 'poses 2 and 7'), set mode to "
         "'specific' and pose_numbers to that list of integers (count can be 0). "
-        "If the reply says 'all poses' (meaning all 11), set mode to 'specific' "
-        "and pose_numbers to [1,2,3,4,5,6,7,8,9,10,11]. If the reply is just a "
+        "If the reply says 'all poses' (meaning all 13), set mode to 'specific' "
+        "and pose_numbers to [1,2,3,4,5,6,7,8,9,10,11,12,13]. If the reply is just a "
         "single number with no list context (e.g. '4' meaning 'give me 4 "
         "images'), set mode to 'count' and count to that integer (pose_numbers "
         "can be empty). If the reply DECLINES standard poses for this question "
@@ -288,12 +288,15 @@ async def parse_new_product_answers(text: str) -> dict:
         "premium poses from question 10 instead), set mode to 'specific' and "
         "pose_numbers to an empty list (count can be 0) — this means ZERO "
         "standard poses, not 'pick one for me'. Pose numbers are always "
-        "between 1 and 11. "
+        "between 1 and 13 (poses 12 and 13 are knee-length crops that only "
+        "work if the reply also includes pose 1 or pose 10 respectively — "
+        "extract exactly what the reply says either way, don't add or "
+        "remove poses yourself). "
         "For the 10th question (premium pose request): if the reply names "
         "specific premium poses (e.g. 'P1, P6, P9' or 'premium 1, 6, 9'), set "
-        "premium_pose_numbers to that list of strings in the form 'P1'..'P11'. "
-        "If the reply says 'all premium' (meaning all 11 premium poses), set "
-        "premium_pose_numbers to ['P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','P11']. "
+        "premium_pose_numbers to that list of strings in the form 'P1'..'P13'. "
+        "If the reply says 'all premium' (meaning all 13 premium poses), set "
+        "premium_pose_numbers to ['P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','P11','P12','P13']. "
         "If the reply skips this question, says 'skip', 'none', or 'no', set "
         "premium_pose_numbers to an empty list.\n\n"
         "Reply:\n" + text

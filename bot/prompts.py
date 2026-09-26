@@ -133,9 +133,13 @@ class Pose:
     id: int
     label: str
     description: str
-    crop_type: str  # "full_length" | "waist_up" | "detail" | "bottom_only"
+    crop_type: str  # "full_length" | "waist_up" | "detail" | "bottom_only" | "knee_length"
     requires_bottom: bool = False
     requires_back_reference: bool = False
+    # Set only for a pose derived by cropping another pose's ALREADY-GENERATED
+    # output (2026-09-26, poses 12/13) rather than generated via its own API
+    # call. See CROP_DEPENDENCY / image_gen.py's crop-derived-pose branch.
+    crop_source_pose: int | None = None
 
 
 # --- Reference binding table (Part 2, 2026-09-16 front/back mixup fix) -----
@@ -160,12 +164,28 @@ POSE_REFERENCE_BINDING: dict[int | str, str] = {
     4: REFERENCE_PYJAMA, 5: REFERENCE_FRONT, 6: REFERENCE_PYJAMA,
     7: REFERENCE_FRONT, 8: REFERENCE_FRONT, 9: REFERENCE_FRONT,
     10: REFERENCE_BACK, 11: REFERENCE_BACK,
+    # Knee-length crop poses (2026-09-26) — never actually used to fetch a
+    # garment reference (they skip generation entirely, see
+    # image_gen.py's crop-derived-pose branch), but every pose_id in
+    # to_generate is looked up here unconditionally, so an entry must exist.
+    # Matches their crop-source pose's own binding.
+    12: REFERENCE_FRONT, 13: REFERENCE_BACK,
     # Premium poses (Question 10)
     "P1": REFERENCE_FRONT, "P2": REFERENCE_FRONT, "P3": REFERENCE_FRONT,
     "P4": REFERENCE_FRONT, "P5": REFERENCE_FRONT, "P6": REFERENCE_FRONT,
     "P7": REFERENCE_FRONT, "P8": REFERENCE_FRONT,
     "P9": REFERENCE_BACK, "P10": REFERENCE_BACK, "P11": REFERENCE_FRONT,
+    "P12": REFERENCE_FRONT, "P13": REFERENCE_BACK,
 }
+
+# The ONLY two derived poses (2026-09-26) — each maps to the ONE pose whose
+# already-generated output it crops. A derived pose's source MUST also be
+# present in the same request (enforced in resolve_pose_selection /
+# resolve_premium_pose_selection below) — this feature never triggers a
+# hidden extra API generation call, per the owner's explicit "no new AI
+# generation call, no new API cost" spec.
+CROP_DEPENDENCY: dict[int, int] = {12: 1, 13: 10}
+PREMIUM_CROP_DEPENDENCY: dict[str, str] = {"P12": "P1", "P13": "P9"}
 
 
 POSES: dict[int, Pose] = {
@@ -256,6 +276,28 @@ POSES: dict[int, Pose] = {
         "waist_up",
         requires_back_reference=True,
     ),
+    12: Pose(
+        12, "Knee-Length Front (Cropped)",
+        "Framed from the top of the head down to just below the knee. This "
+        "is NOT a separately generated pose — it is a direct programmatic "
+        "crop of pose 1's own generated output for this product, so the "
+        "stance, gesture, garment rendering, background and lighting are "
+        "always identical to whatever pose 1 image was actually produced.",
+        "knee_length",
+        crop_source_pose=1,
+    ),
+    13: Pose(
+        13, "Knee-Length Back (Cropped)",
+        "Framed from the top of the head down to just below the knee, back "
+        "view. This is NOT a separately generated pose — it is a direct "
+        "programmatic crop of pose 10's own generated output for this "
+        "product, so the stance, garment rendering, background and "
+        "lighting are always identical to whatever pose 10 image was "
+        "actually produced.",
+        "knee_length",
+        requires_back_reference=True,
+        crop_source_pose=10,
+    ),
 }
 
 # Used when the owner gives only a count (e.g. "5") instead of specific
@@ -319,10 +361,19 @@ def resolve_pose_selection(
 
     if pose_request["mode"] == "specific":
         candidates = [p for p in pose_request["pose_numbers"] if p in POSES]
+        candidate_set = set(candidates)
         selected: list[int] = []
         blocked: list[tuple[int, str]] = []
         for pose_id in candidates:
             reason = hard_block_reason(pose_id)
+            if reason is None:
+                dep = CROP_DEPENDENCY.get(pose_id)
+                if dep is not None and dep not in candidate_set:
+                    reason = (
+                        f"pose {pose_id} is a crop of pose {dep}'s own "
+                        f"output, not generated separately — pose {dep} "
+                        "must also be selected in this same request"
+                    )
             if reason:
                 blocked.append((pose_id, reason))
             else:
@@ -839,6 +890,14 @@ PREMIUM_JHUMKA_SIZES = [
     "delicate small jhumka earrings",
 ]
 
+# --- Hand-held flower prop (2026-09-26, Part 4) ------------------------------
+# A single prop substitution applied across the premium editorial poses —
+# does not touch pose, background, lighting, jewelry, or the model reference.
+# Fixed list only, no open-ended flower types. P12/P13 (crop-derived from
+# P1/P9) never pick their own flower — whatever flower ended up in P1's or
+# P9's actual generated output is simply carried forward by the crop.
+PREMIUM_HAND_PROPS = ["a sunflower", "a white rose", "a pink rose", "a red rose"]
+
 
 def pick_premium_variation(used_combos: set) -> dict:
     """Call once per premium image within a product. `used_combos` is a
@@ -864,6 +923,7 @@ def pick_premium_variation(used_combos: set) -> dict:
         "expression": random.choice(PREMIUM_EXPRESSIONS),
         "jewelry_detail": random.choice(PREMIUM_JEWELRY_DETAILS),
         "jhumka_size": random.choice(PREMIUM_JHUMKA_SIZES),
+        "flower": random.choice(PREMIUM_HAND_PROPS),
     }
 
 
@@ -902,6 +962,13 @@ class PremiumPose:
     description: str
     reference_filename: str
     requires_back_reference: bool = False
+    # Set only for a pose derived by cropping another premium pose's
+    # ALREADY-GENERATED output (2026-09-26, P12/P13) — see
+    # prompts.PREMIUM_CROP_DEPENDENCY and image_gen.py's crop-derived-pose
+    # branch. No reference photo exists for these (no photographer shot was
+    # ever taken of them) — reference_filename below is a placeholder name
+    # only, matching the field's documentary-only convention.
+    crop_source_pose: str | None = None
 
 
 PREMIUM_POSES: dict[str, PremiumPose] = {
@@ -1042,6 +1109,29 @@ PREMIUM_POSES: dict[str, PremiumPose] = {
         "shadow. Background softly blurred — the garment is the subject.",
         "premium_p11_embroidery_closeup.png",
     ),
+    "P12": PremiumPose(
+        "P12", "Knee-Length Front (Cropped)", "knee-length", "locked premium set",
+        "Framed from the top of the head down to just below the knee. This "
+        "is NOT a separately generated pose — it is a direct programmatic "
+        "crop of P1's own generated output for this product, so the "
+        "stance, gesture, hand prop, garment rendering, background and "
+        "lighting are always identical to whatever P1 image was actually "
+        "produced.",
+        "premium_p12_kneelength_front_cropped.png",
+        crop_source_pose="P1",
+    ),
+    "P13": PremiumPose(
+        "P13", "Knee-Length Back (Cropped)", "knee-length, back view",
+        "locked premium set",
+        "Framed from the top of the head down to just below the knee, back "
+        "view. This is NOT a separately generated pose — it is a direct "
+        "programmatic crop of P9's own generated output for this product, "
+        "so the stance, garment rendering, background and lighting are "
+        "always identical to whatever P9 image was actually produced.",
+        "premium_p13_kneelength_back_cropped.png",
+        requires_back_reference=True,
+        crop_source_pose="P9",
+    ),
 }
 
 
@@ -1059,6 +1149,7 @@ def resolve_premium_pose_selection(
     10/11 — never silently dropped here (the owner named it on purpose), so
     a genuinely missing back reference is returned as blocked for the
     caller to surface, exactly like resolve_pose_selection's specific mode."""
+    normalized_ids = {raw.strip().upper() for raw in pose_ids}
     selected: list[str] = []
     blocked: list[tuple[str, str]] = []
     for raw in pose_ids:
@@ -1068,8 +1159,17 @@ def resolve_premium_pose_selection(
         pose = PREMIUM_POSES[pid]
         if pose.requires_back_reference and not has_back_reference:
             blocked.append((pid, "no back-side raw reference photo was supplied"))
-        else:
-            selected.append(pid)
+            continue
+        dep = PREMIUM_CROP_DEPENDENCY.get(pid)
+        if dep is not None and dep not in normalized_ids:
+            blocked.append((
+                pid,
+                f"pose {pid} is a crop of {dep}'s own output, not generated "
+                f"separately — {dep} must also be selected in this same "
+                "request",
+            ))
+            continue
+        selected.append(pid)
     return selected, blocked
 
 
@@ -1089,6 +1189,13 @@ PREMIUM EDITORIAL POSE {pose_id} — {pose_label}: {pose_description}
 
 GESTURE FOR THIS IMAGE: {hand}; head {head}; eyes {eye}; expression: \
 {expression}; jewellery detail: {jewelry_detail}; {jhumka_size}.
+
+HAND PROP: the model holds a single stem of {flower} naturally in \
+whichever hand is free given the gesture above. If the gesture above \
+already occupies both hands with a specific task (for example resting on \
+a cushion, supporting the cheek, or braced on the floor for balance), let \
+the flower rest loosely across the fingers of one of those hands without \
+changing its described position or task in any other way.
 
 BACKGROUND (locked for this entire product, identical in every image): \
 {background}
@@ -1159,6 +1266,7 @@ def build_premium_pose_prompt(
         expression=variation["expression"],
         jewelry_detail=variation["jewelry_detail"],
         jhumka_size=variation["jhumka_size"],
+        flower=variation["flower"],
         background=PREMIUM_BACKGROUND_SETS[background_set],
         lighting=LIGHTING,
         cleanup_rule=GARMENT_CLEANUP,
