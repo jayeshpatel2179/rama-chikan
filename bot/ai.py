@@ -1,7 +1,9 @@
 import base64
+import io
 import json
 
 from openai import AsyncOpenAI
+from PIL import Image
 
 from bot.config import OPENAI_API_KEY
 
@@ -12,6 +14,33 @@ _TEXT_MODEL = "gpt-5.6-luna"
 # photos (garment colour) — worth the accuracy here, everything else in the
 # flow is owner-entered rather than guessed.
 _VISION_MODEL = "gpt-5.6"
+
+# Cost optimization (2026-09-26) — vision-model cost scales with image
+# resolution, and NOT every vision call here needs full resolution to do its
+# job correctly. Applied ONLY to detect_color (dominant colour is a coarse,
+# low-frequency property, trivially readable at low resolution) and
+# generate_instagram_caption (pure marketing text, has zero effect on the
+# actual product photos). Deliberately NOT applied to describe_back_reference
+# — that call counts and locates fine embroidery motifs, and its output text
+# is fed directly into what the back-view POSE IMAGES actually draw
+# (prompts.BACK_VIEW_FIDELITY) — downsizing that one risks a real accuracy
+# loss in generated images, which is exactly what this change must not do.
+_VISION_ANALYSIS_MAX_DIMENSION = 512
+
+
+def _downscale_for_analysis(image_bytes: bytes) -> bytes:
+    """Shrinks a copy of the image for a coarse vision-analysis call only —
+    never touches the original bytes used anywhere else (image generation,
+    Shopify upload, Instagram posting all keep the full-resolution image)."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    width, height = image.size
+    longest = max(width, height)
+    if longest > _VISION_ANALYSIS_MAX_DIMENSION:
+        scale = _VISION_ANALYSIS_MAX_DIMENSION / longest
+        image = image.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+    out = io.BytesIO()
+    image.save(out, format="JPEG", quality=85)
+    return out.getvalue()
 
 _COLOR_SCHEMA = {
     "type": "json_schema",
@@ -35,7 +64,7 @@ async def detect_color(photo_bytes_list: list[bytes]) -> str:
         {"type": "text", "text": "What is the dominant colour of this garment?"}
     ]
     for photo_bytes in photo_bytes_list:
-        b64 = base64.b64encode(photo_bytes).decode("ascii")
+        b64 = base64.b64encode(_downscale_for_analysis(photo_bytes)).decode("ascii")
         content.append(
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
         )
@@ -336,7 +365,7 @@ async def generate_instagram_caption(
     describe_back_reference/detect_color above rather than writing blind
     from the intake answers alone."""
     garment_type = "kurti and pyjama set" if listing_type == "kurti_pyjama_set" else "kurti"
-    b64 = base64.b64encode(first_image_bytes).decode("ascii")
+    b64 = base64.b64encode(_downscale_for_analysis(first_image_bytes)).decode("ascii")
     prompt = (
         "You are the Instagram voice of Rama Chikan, a heritage Lucknowi "
         "chikankari brand — three generations of hand embroidery craft. "
@@ -365,7 +394,7 @@ async def generate_instagram_caption(
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             }
         ],
