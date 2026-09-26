@@ -890,45 +890,12 @@ PREMIUM_JHUMKA_SIZES = [
     "delicate small jhumka earrings",
 ]
 
-# --- Hand-held flower prop (2026-09-26, Part 4; scope-fixed 2026-09-26) -----
-# A single prop substitution applied across the premium editorial poses —
-# does not touch pose, background, lighting, jewelry, or the model reference.
-# Fixed list only, no open-ended flower types. P12/P13 (crop-derived from
-# P1/P9) never pick their own flower — whatever flower ended up in P1's or
-# P9's actual generated output is simply carried forward by the crop.
-#
-# Plural nouns (not "a sunflower") since the prop wording is now "3 to 5
-# stems of {flower}" — see PREMIUM_MEGA_PROMPT_TEMPLATE's HAND PROP clause.
-PREMIUM_HAND_PROPS = [
-    "sunflowers", "red roses", "pink roses", "white roses",
-    "marigolds", "tuberoses", "gerbera daisies",
-]
-
-
-def pick_premium_flower() -> str:
-    """Call ONCE per product, only if that product generates at least one
-    premium pose — same convention as pick_premium_model_variation /
-    pick_premium_background_set. Fixed across every premium image of that
-    product (including P12/P13, which never call this themselves — they
-    inherit whatever flower is already in their crop source's pixels).
-
-    Bug fix (2026-09-26): this used to be picked inside pick_premium_variation
-    below, which runs once PER IMAGE, so a single product's premium photo set
-    could show a different flower in every shot. Moved here, its own
-    product-scoped pick, called once by image_gen.py the same way
-    premium_model_variation already is."""
-    return random.choice(PREMIUM_HAND_PROPS)
-
-
 def pick_premium_variation(used_combos: set) -> dict:
     """Call once per premium image within a product. `used_combos` is a
     set[tuple[str, str, str]] of (hand, head, eye) already used for this
     product's PREMIUM images specifically — tracked separately from the
     standard flow's used_gesture_combos, mutated in place. Guarantees no two
-    images of one product share the same (hand, head, gaze) combination.
-
-    Does NOT pick the flower — that's product-scoped (pick_premium_flower
-    above), not per-image."""
+    images of one product share the same (hand, head, gaze) combination."""
     for _ in range(50):
         hand = random.choice(PREMIUM_HAND_POSITIONS)
         head = random.choice(PREMIUM_HEAD_DIRECTIONS)
@@ -1137,9 +1104,8 @@ PREMIUM_POSES: dict[str, PremiumPose] = {
         "Framed from the top of the head down to just below the knee. This "
         "is NOT a separately generated pose — it is a direct programmatic "
         "crop of P1's own generated output for this product, so the "
-        "stance, gesture, hand prop, garment rendering, background and "
-        "lighting are always identical to whatever P1 image was actually "
-        "produced.",
+        "stance, gesture, garment rendering, background and lighting are "
+        "always identical to whatever P1 image was actually produced.",
         "premium_p12_kneelength_front_cropped.png",
         crop_source_pose="P1",
     ),
@@ -1213,23 +1179,6 @@ PREMIUM EDITORIAL POSE {pose_id} — {pose_label}: {pose_description}
 GESTURE FOR THIS IMAGE: {hand}; head {head}; eyes {eye}; expression: \
 {expression}; jewellery detail: {jewelry_detail}; {jhumka_size}.
 
-HAND PROP: the model holds the flowers in a relaxed, editorial way, \
-naturally near the chest — either cradling the blooms gently with one \
-hand resting just below the collarbone, or with both hands resting \
-together around the stems, whichever reads more natural for the gesture \
-above; vary this hand placement across the product's different poses the \
-way a real photoshoot would, while the flower type itself stays identical \
-in every image. This should read as a warm, natural, premium lifestyle/ \
-editorial photograph — not a plain product photo with a flower placed on \
-top. A small, casual handful of 3 to 5 stems of {flower}, all the same \
-flower type, with their long green stems/stalks visible, held loosely — \
-like flowers freshly picked or received, NOT a florist-arranged bouquet \
-and NOT wrapped in paper, cellophane, or ribbon. If the gesture above \
-already occupies both hands with a specific task (for example resting on \
-a cushion, supporting the cheek, or braced on the floor for balance), let \
-the stems rest loosely across the fingers of one of those hands without \
-changing its described position or task in any other way.
-
 BACKGROUND (locked for this entire product, identical in every image): \
 {background}
 
@@ -1259,7 +1208,6 @@ def build_premium_pose_prompt(
     background_set: str,
     model_variation: dict,
     variation: dict,
-    flower: str,
     has_face_reference: bool,
     has_pyjama_reference: bool = False,
     back_reference_description: str | None = None,
@@ -1300,7 +1248,6 @@ def build_premium_pose_prompt(
         expression=variation["expression"],
         jewelry_detail=variation["jewelry_detail"],
         jhumka_size=variation["jhumka_size"],
-        flower=flower,
         background=PREMIUM_BACKGROUND_SETS[background_set],
         lighting=LIGHTING,
         cleanup_rule=GARMENT_CLEANUP,

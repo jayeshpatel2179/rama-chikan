@@ -210,11 +210,6 @@ async def generate_model_images(
     premium_background_set: str | None = None
     premium_model_variation: dict | None = None
     premium_face_reference: bytes | None = None
-    # Bug fix (2026-09-26): picked once per PRODUCT here, same convention as
-    # premium_background_set/premium_model_variation above — previously the
-    # flower was picked inside pick_premium_variation, which runs once per
-    # IMAGE, so one product's premium photos could show different flowers.
-    premium_flower: str | None = None
 
     # Resolved once per product (not per image) and reused for every back
     # pose, standard OR premium alike — this is the literal, ground-truth
@@ -272,8 +267,6 @@ async def generate_model_images(
                 premium_background_set = prompts.pick_premium_background_set()
             if premium_model_variation is None:
                 premium_model_variation = prompts.pick_premium_model_variation()
-            if premium_flower is None:
-                premium_flower = prompts.pick_premium_flower()
             variation = prompts.pick_premium_variation(used_premium_gesture_combos)
 
             # PYJAMA_REFERENCE is only ever additive on top of a FRONT-bound
@@ -303,7 +296,6 @@ async def generate_model_images(
                 background_set=premium_background_set,
                 model_variation=premium_model_variation,
                 variation=variation,
-                flower=premium_flower,
                 has_face_reference=use_face_reference,
                 has_pyjama_reference=pose_has_pyjama_reference,
                 back_reference_description=back_reference_description,
