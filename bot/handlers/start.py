@@ -51,7 +51,25 @@ async def unrecognized_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     question entirely and goes straight to the 4 category buttons — the
     SAME message start_new_product/confirm_yes_tap send, so tapping one
     works identically (those 4 buttons are registered as entry points on
-    bot.handlers.new_product's ConversationHandler)."""
+    bot.handlers.new_product's ConversationHandler).
+
+    2026-09-29 bug fix: a product still waiting on its GO LIVE buttons
+    (CONFIRMING state) has no text handler registered at all, so any stray
+    text the owner sends while it's sitting there (a stray word, an
+    accidental message — anything that isn't a button tap) falls through
+    every other handler and lands here too. Offering to start a FRESH
+    product on top of one still pending is exactly the confusing "why is
+    it asking me this already" case that was reported — so a draft still
+    in flight (chat_data still has one — cleared only on finalize, abort,
+    or /cancel) short-circuits straight to a reminder instead, skipping
+    both the confirm question and the 24h skip-ahead above."""
+    if context.chat_data.get("draft") is not None:
+        await update.effective_message.reply_text(
+            "You still have a product waiting on the buttons above — tap a "
+            "GO LIVE button, ABORT, or /cancel before starting a new one."
+        )
+        return
+
     chat_id = update.effective_chat.id
     if state.confirm_yes_is_fresh(chat_id):
         context.chat_data.clear()
