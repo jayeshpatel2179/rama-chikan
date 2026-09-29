@@ -50,6 +50,13 @@ PREMIUM_COLLECTION_ID = "gid://shopify/Collection/572957360439"
 KURTI_SETS_COLLECTION_ID = "gid://shopify/Collection/572957393207"
 ON_SALE_COLLECTION_ID = "gid://shopify/Collection/570532299063"
 
+# The 2 new garment categories (2026-09-29 four-button flow restructure) —
+# each new product is unconditionally added to its own collection here, the
+# same way every kurti product is unconditionally added to KURTAS_COLLECTION_ID
+# above, regardless of any owner-chosen category.
+DUPATTA_COLLECTION_ID = "gid://shopify/Collection/574476026167"
+WOMEN_BOTTOMS_COLLECTION_ID = "gid://shopify/Collection/574476058935"
+
 # Keyed by the lowercased Question 5 category label. "for nani" and "kurtas"
 # are kept as aliases so an owner who types the old wording still resolves
 # to the right (renamed) collection — bot/handlers/new_product.py also

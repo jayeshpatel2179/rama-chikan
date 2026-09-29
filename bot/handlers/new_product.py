@@ -24,13 +24,26 @@ from bot.handlers.cancel import cancel
 logger = logging.getLogger(__name__)
 
 (
+    CHOOSING_FLOW,
     WAITING_FRONT_PHOTO,
     WAITING_BACK_PHOTO,
-    WAITING_PYJAMA_CHOICE,
     WAITING_PYJAMA_PHOTO,
+    WAITING_DUPATTA_PHOTO,
+    WAITING_BOTTOMS_FRONT_PHOTO,
+    WAITING_BOTTOMS_BACK_PHOTO,
     WAITING_ANSWERS,
     CONFIRMING,
-) = range(6)
+) = range(9)
+
+# draft["listing_type"] values — set once, at the button tap that starts the
+# session (2026-09-29 four-button flow restructure), instead of being asked
+# as its own question partway through like the old single-flow design.
+# Reused as-is by bot.prompts / bot.image_gen / bot.ai / bot.shopify_client,
+# which all already key off these exact strings.
+FLOW_KURTI_ONLY = "kurti_only"
+FLOW_KURTI_PYJAMA_SET = "kurti_pyjama_set"
+FLOW_DUPATTA = "dupatta"
+FLOW_WOMEN_BOTTOMS = "women_bottoms"
 
 # Photo intake is sequential, one at a time — the bot explicitly asks for
 # the FRONT photo first, waits for it, then explicitly asks for the BACK
@@ -101,7 +114,7 @@ _PREMIUM_POSE_MENU = "\n".join(
     " · ".join(f"*{n}* {_PREMIUM_POSE_MENU_LABELS[n]}" for n in line) for line in _PREMIUM_POSE_MENU_LINES
 )
 
-_QUESTIONS_MESSAGE = (
+_KURTI_QUESTIONS_MESSAGE = (
     "Quick details: reply all in ONE message:\n\n"
     "🧵 *1)* Material (e.g. rayon, chikankari)\n"
     "📏 *2)* Sizes + qty (e.g. \"3 XS, 1 S\"). Unlisted sizes = out of stock\n"
@@ -111,12 +124,62 @@ _QUESTIONS_MESSAGE = (
     "*5* Mom / *6* Me / *7* On Sale (auto-added if discount > 0, skip it)\n"
     "⭐ *6)* Bestseller? y/n\n"
     "↕️ *7)* Length: short/long\n"
-    "👗 *8)* Kurti+pyjama set or kurti only?\n"
-    "📸 *9)* Poses: numbers (e.g. \"1,5,3\"), \"all poses\" for all 13, or a "
+    "📸 *8)* Poses: numbers (e.g. \"1,5,3\"), \"all poses\" for all 13, or a "
     "count (e.g. \"4\"). Poses *12*/*13* need pose *1*/*10* also selected:\n"
     + _POSE_MENU + "\n\n"
-    "✨ *10)* Premium instead? P-numbers (e.g. \"P1,P6,P9\"), \"all premium,\" or "
+    "✨ *9)* Premium instead? P-numbers (e.g. \"P1,P6,P9\"), \"all premium,\" or "
     "skip. P*12*/P*13* need P*1*/P*9* also selected:\n" + _PREMIUM_POSE_MENU
+)
+
+# --- Dupatta question set (Button 3, 2026-09-29) ----------------------------
+_DUPATTA_POSE_MENU_LABELS = {
+    1: "Full-length drape",
+    2: "Mid-length view",
+    3: "Material/embroidery close-up",
+    4: "Draped over shoulder",
+    5: "Held out to show flow",
+}
+assert set(_DUPATTA_POSE_MENU_LABELS) == set(prompts.DUPATTA_POSES), (
+    "dupatta pose menu is out of sync with bot.prompts.DUPATTA_POSES"
+)
+_DUPATTA_POSE_MENU = " · ".join(f"*{n}* {label}" for n, label in _DUPATTA_POSE_MENU_LABELS.items())
+
+_DUPATTA_QUESTIONS_MESSAGE = (
+    "Quick details: reply all in ONE message:\n\n"
+    "🧵 *1)* Material (e.g. chiffon, cotton, chanderi, chikankari)\n"
+    "📏 *2)* Length: 2.25m / 2.50m / 2.75m\n"
+    "💰 *3)* Price (₹)\n"
+    "🏷️ *4)* Discount % (or \"none\")\n"
+    "🗂️ *5)* Category: *1* Premium / *2* Kurtis / *3* Kurti Sets / *4* Nani-Dadi / "
+    "*5* Mom / *6* Me / *7* On Sale (auto-added if discount > 0, skip it)\n"
+    "⭐ *6)* Bestseller? y/n\n"
+    "📸 *7)* Poses: numbers (e.g. \"1,3\"), \"all poses\" for all 5, or a count:\n"
+    + _DUPATTA_POSE_MENU
+)
+
+# --- Women Bottoms question set (Button 4, 2026-09-29) ----------------------
+_BOTTOMS_POSE_MENU_LABELS = {
+    1: "Front full-length",
+    2: "Front hem+footwear close-up",
+    3: "Side hem+footwear close-up",
+    4: "Back full-length",
+    5: "Waist/fit close-up",
+}
+assert set(_BOTTOMS_POSE_MENU_LABELS) == set(prompts.BOTTOMS_POSES), (
+    "bottoms pose menu is out of sync with bot.prompts.BOTTOMS_POSES"
+)
+_BOTTOMS_POSE_MENU = " · ".join(f"*{n}* {label}" for n, label in _BOTTOMS_POSE_MENU_LABELS.items())
+
+_BOTTOMS_QUESTIONS_MESSAGE = (
+    "Quick details: reply all in ONE message:\n\n"
+    "🧵 *1)* Material & type (e.g. \"Chiffon, Sharara\") — types: Pant / Plazo / "
+    "Balloon Salwar / Tulip Salwar / Sharara\n"
+    "📏 *2)* Sizes + qty (e.g. \"3 XS, 1 S\"). Unlisted sizes = out of stock\n"
+    "💰 *3)* Price (₹)\n"
+    "🏷️ *4)* Discount % (or \"none\")\n"
+    "⭐ *5)* Bestseller? y/n\n"
+    "📸 *6)* Poses: numbers (e.g. \"1,3\"), \"all poses\" for all 5, or a count:\n"
+    + _BOTTOMS_POSE_MENU
 )
 
 _ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
@@ -202,9 +265,79 @@ def _live_draft(context: ContextTypes.DEFAULT_TYPE, session_id: str) -> dict | N
     return draft
 
 
-async def receive_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def _flow_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("👚 Kurti", callback_data="flow_kurti")],
+            [InlineKeyboardButton("👚 Kurti + Pyjama Set", callback_data="flow_kurti_pyjama")],
+            [InlineKeyboardButton("🧣 Dupatta", callback_data="flow_dupatta")],
+            [InlineKeyboardButton("👖 Women Bottoms", callback_data="flow_bottoms")],
+        ]
+    )
+
+
+async def start_new_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """/newproduct — entry point (2026-09-29 four-button flow restructure).
+    Replaces the old "send any photo to start" trigger: a session now
+    always starts by picking one of the 4 category buttons, which decides
+    both the photo request sequence and the question set that follow."""
+    context.chat_data.clear()
+    await update.message.reply_text(
+        "What are you listing?", reply_markup=_flow_choice_keyboard()
+    )
+    return CHOOSING_FLOW
+
+
+def _new_draft(context: ContextTypes.DEFAULT_TYPE, listing_type: str) -> dict:
     draft = context.chat_data.setdefault("draft", {})
-    draft.setdefault("session_id", _new_session_id())
+    draft["session_id"] = _new_session_id()
+    draft["listing_type"] = listing_type
+    return draft
+
+
+async def flow_kurti_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _new_draft(context, FLOW_KURTI_ONLY)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Send the front photo of the kurti.")
+    return WAITING_FRONT_PHOTO
+
+
+async def flow_kurti_pyjama_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _new_draft(context, FLOW_KURTI_PYJAMA_SET)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Send the front photo of the kurti.")
+    return WAITING_FRONT_PHOTO
+
+
+async def flow_dupatta_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _new_draft(context, FLOW_DUPATTA)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Send the dupatta photo.")
+    return WAITING_DUPATTA_PHOTO
+
+
+async def flow_bottoms_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _new_draft(context, FLOW_WOMEN_BOTTOMS)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Send the front photo of the bottoms.")
+    return WAITING_BOTTOMS_FRONT_PHOTO
+
+
+# --- Button 1/2: Kurti / Kurti + Pyjama Set (front/back photo, shared) -----
+
+
+async def receive_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    draft = context.chat_data.get("draft")
+    if draft is None:
+        return ConversationHandler.END
 
     largest = update.message.photo[-1]
     file = await context.bot.get_file(largest.file_id)
@@ -217,15 +350,6 @@ async def receive_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def prompt_for_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Please send the front photo of the garment first.")
     return WAITING_FRONT_PHOTO
-
-
-def _pyjama_choice_keyboard(session_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Yes — I'll send the pyjama photo", callback_data=f"pyjama_yes:{session_id}")],
-            [InlineKeyboardButton("No — kurti only", callback_data=f"pyjama_no:{session_id}")],
-        ]
-    )
 
 
 async def receive_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -243,44 +367,19 @@ async def receive_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     draft["color"] = await ai.detect_color(draft["raw_photos"])
     draft.pop("active_task", None)
 
-    await update.message.reply_text(
-        "Does this listing include a pyjama?",
-        reply_markup=_pyjama_choice_keyboard(draft["session_id"]),
-    )
-    return WAITING_PYJAMA_CHOICE
+    # Which button the owner tapped already decided pyjama-set vs kurti-only
+    # (2026-09-29) — no more mid-flow Y/N question here.
+    if draft["listing_type"] == FLOW_KURTI_PYJAMA_SET:
+        await update.message.reply_text("Now send the pyjama photo.")
+        return WAITING_PYJAMA_PHOTO
+
+    await update.message.reply_text(_KURTI_QUESTIONS_MESSAGE, parse_mode="Markdown")
+    return WAITING_ANSWERS
 
 
 async def prompt_for_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Got the front photo already — now send the back photo.")
     return WAITING_BACK_PHOTO
-
-
-async def pyjama_yes_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    session_id = query.data.split(":", 1)[1]
-    draft = _live_draft(context, session_id)
-    if draft is None:
-        await _reply_dead_session(query)
-        return ConversationHandler.END
-
-    await query.answer()
-    await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text("Send the pyjama photo.")
-    return WAITING_PYJAMA_PHOTO
-
-
-async def pyjama_no_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    session_id = query.data.split(":", 1)[1]
-    draft = _live_draft(context, session_id)
-    if draft is None:
-        await _reply_dead_session(query)
-        return ConversationHandler.END
-
-    await query.answer()
-    await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(_QUESTIONS_MESSAGE, parse_mode="Markdown")
-    return WAITING_ANSWERS
 
 
 async def receive_pyjama_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -297,7 +396,7 @@ async def receive_pyjama_photo(update: Update, context: ContextTypes.DEFAULT_TYP
     draft["pyjama_photo"] = bytes(await file.download_as_bytearray())
 
     await update.message.reply_text("Got the pyjama photo.")
-    await update.message.reply_text(_QUESTIONS_MESSAGE, parse_mode="Markdown")
+    await update.message.reply_text(_KURTI_QUESTIONS_MESSAGE, parse_mode="Markdown")
     return WAITING_ANSWERS
 
 
@@ -306,25 +405,111 @@ async def prompt_for_pyjama_photo(update: Update, context: ContextTypes.DEFAULT_
     return WAITING_PYJAMA_PHOTO
 
 
+# --- Button 3: Dupatta (single photo) ---------------------------------------
+
+
+async def receive_dupatta_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    draft = context.chat_data.get("draft")
+    if draft is None:
+        return ConversationHandler.END
+
+    draft["active_task"] = asyncio.current_task()
+    largest = update.message.photo[-1]
+    file = await context.bot.get_file(largest.file_id)
+    draft["dupatta_photo"] = bytes(await file.download_as_bytearray())
+    draft["raw_photos"] = [draft["dupatta_photo"]]
+
+    await update.message.reply_text("Got the dupatta photo. Looking at it now...")
+    draft["color"] = await ai.detect_color(draft["raw_photos"])
+    draft.pop("active_task", None)
+
+    await update.message.reply_text(_DUPATTA_QUESTIONS_MESSAGE, parse_mode="Markdown")
+    return WAITING_ANSWERS
+
+
+async def prompt_for_dupatta_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Please send the dupatta photo first.")
+    return WAITING_DUPATTA_PHOTO
+
+
+# --- Button 4: Women Bottoms (front/back photo) -----------------------------
+
+
+async def receive_bottoms_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    draft = context.chat_data.get("draft")
+    if draft is None:
+        return ConversationHandler.END
+
+    largest = update.message.photo[-1]
+    file = await context.bot.get_file(largest.file_id)
+    draft["bottoms_front_photo"] = bytes(await file.download_as_bytearray())
+
+    await update.message.reply_text("Got the front photo. Now send the back photo.")
+    return WAITING_BOTTOMS_BACK_PHOTO
+
+
+async def prompt_for_bottoms_front_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Please send the front photo of the bottoms first.")
+    return WAITING_BOTTOMS_FRONT_PHOTO
+
+
+async def receive_bottoms_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    draft = context.chat_data.get("draft")
+    if draft is None:
+        return ConversationHandler.END
+
+    draft["active_task"] = asyncio.current_task()
+    largest = update.message.photo[-1]
+    file = await context.bot.get_file(largest.file_id)
+    draft["bottoms_back_photo"] = bytes(await file.download_as_bytearray())
+    draft["raw_photos"] = [draft["bottoms_front_photo"], draft["bottoms_back_photo"]]
+
+    await update.message.reply_text("Got the back photo. Looking at them now...")
+    draft["color"] = await ai.detect_color(draft["raw_photos"])
+    draft.pop("active_task", None)
+
+    await update.message.reply_text(_BOTTOMS_QUESTIONS_MESSAGE, parse_mode="Markdown")
+    return WAITING_ANSWERS
+
+
+async def prompt_for_bottoms_back_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Got the front photo already — now send the back photo.")
+    return WAITING_BOTTOMS_BACK_PHOTO
+
+
 async def photo_during_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Already have the photo(s) for this product — please answer the 10 questions above."
+        "Already have the photo(s) for this product — please answer the questions above."
     )
     return WAITING_ANSWERS
 
 
 async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Dispatches to the right per-flow answer parser based on
+    draft["listing_type"] (2026-09-29 four-button flow restructure) — which
+    button the owner tapped at the start of the session decided which
+    question set they were shown, so it also decides how the reply is
+    parsed here."""
     draft = context.chat_data.get("draft")
     if draft is None:
         return ConversationHandler.END
+
+    if draft["listing_type"] in (FLOW_KURTI_ONLY, FLOW_KURTI_PYJAMA_SET):
+        return await _receive_kurti_answers(update, context, draft)
+    if draft["listing_type"] == FLOW_DUPATTA:
+        return await _receive_dupatta_answers(update, context, draft)
+    return await _receive_bottoms_answers(update, context, draft)
+
+
+async def _receive_kurti_answers(update: Update, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> int:
     text = update.message.text.strip()
 
     try:
-        parsed = await ai.parse_new_product_answers(text)
+        parsed = await ai.parse_kurti_answers(text)
     except Exception:
         logger.exception("Failed to parse new-product answers")
         await update.message.reply_text(
-            "Couldn't read that — please reply with all 10 answers in one message."
+            "Couldn't read that — please reply with all 9 answers in one message."
         )
         return WAITING_ANSWERS
 
@@ -342,23 +527,23 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if invalid_sizes or not parsed["sizes"]:
         await update.message.reply_text(
             f"Not valid sizes: {', '.join(invalid_sizes) or '(none given)'}.\n"
-            f"Rama Chikan only sells: {', '.join(VALID_SIZES)}. Please resend all 10 answers."
+            f"Rama Chikan only sells: {', '.join(VALID_SIZES)}. Please resend all 9 answers."
         )
         return WAITING_ANSWERS
 
     if parsed["price"] <= 0:
-        await update.message.reply_text("Price must be a positive number — please resend all 10 answers.")
+        await update.message.reply_text("Price must be a positive number — please resend all 9 answers.")
         return WAITING_ANSWERS
 
     if not (0 <= parsed["discount_pct"] < 100):
-        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 10 answers.")
+        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 9 answers.")
         return WAITING_ANSWERS
 
     if not parsed["categories"]:
         await update.message.reply_text(
             "Didn't catch a category — reply with one or more of Premium, Kurtis, "
             "Kurti Sets, For Nani/Dadi, For Mom, For Me, On Sale (please resend "
-            "all 10 answers)."
+            "all 9 answers)."
         )
         return WAITING_ANSWERS
 
@@ -382,7 +567,6 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     draft["categories"] = categories
     draft["is_bestseller"] = parsed["is_bestseller"]
     draft["kurti_length"] = parsed["kurti_length"]
-    draft["listing_type"] = parsed["listing_type"]
     draft["compare_at_price"] = shopify_client.compute_compare_at_price(
         parsed["price"], parsed["discount_pct"]
     )
@@ -399,44 +583,166 @@ async def receive_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(
             "Couldn't resolve any poses from that — reply with pose numbers "
             "like \"1, 5, 3\", \"all poses\", or a count like \"4\" for "
-            "question 9, and/or premium pose numbers like \"P1, P6\" for "
-            "question 10 (please resend all 10 answers)."
+            "the poses question, and/or premium pose numbers like \"P1, P6\" "
+            "for the premium question (please resend all 9 answers)."
         )
         return WAITING_ANSWERS
 
     if blocked:
-        # premium_selected only ever excludes poses resolve_premium_pose_selection
-        # itself blocked (missing back reference, or — since 2026-09-26 — a
-        # missing P1/P9 crop dependency for P12/P13) — folded in here
-        # unconditionally so the rest still generate once the owner resolves
-        # whatever's blocked below.
-        draft["pending_selected_poses"] = selected + premium_selected
-        block_lines = "\n".join(f"- Pose {p}: {reason}" for p, reason in blocked)
-        buttons = []
-        if selected or premium_selected:
-            buttons.append(
-                [InlineKeyboardButton(
-                    "▶️ Proceed without these",
-                    callback_data=f"proceed_blocked:{draft['session_id']}",
-                )]
-            )
-        buttons.append(
-            [InlineKeyboardButton(
-                "📷 Resend answers / new photo",
-                callback_data=f"cancel_blocked:{draft['session_id']}",
-            )]
-        )
-        msg = "Can't generate some of the poses you asked for:\n" + block_lines
-        remaining = selected + premium_selected
-        if remaining:
-            msg += f"\n\nThe rest ({', '.join(str(p) for p in remaining)}) can still be generated."
-        else:
-            msg += "\n\nNone of the poses you asked for can be generated as-is."
-        msg += "\n\nProceed without the blocked ones, or resend?"
-        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
-        return WAITING_ANSWERS
+        return await _handle_blocked_poses(update.message, draft, selected + premium_selected, blocked)
 
     return await _generate_and_send_draft(update.message, context, draft, selected + premium_selected)
+
+
+async def _receive_dupatta_answers(update: Update, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> int:
+    text = update.message.text.strip()
+
+    try:
+        parsed = await ai.parse_dupatta_answers(text)
+    except Exception:
+        logger.exception("Failed to parse dupatta answers")
+        await update.message.reply_text(
+            "Couldn't read that — please reply with all 7 answers in one message."
+        )
+        return WAITING_ANSWERS
+
+    if _ALL_POSES_RE.search(text):
+        parsed["pose_request"] = {"mode": "specific", "pose_numbers": list(prompts.DUPATTA_POSES), "count": 0}
+
+    if parsed["price"] <= 0:
+        await update.message.reply_text("Price must be a positive number — please resend all 7 answers.")
+        return WAITING_ANSWERS
+
+    if not (0 <= parsed["discount_pct"] < 100):
+        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 7 answers.")
+        return WAITING_ANSWERS
+
+    if not parsed["categories"]:
+        await update.message.reply_text(
+            "Didn't catch a category — reply with one or more of Premium, Kurtis, "
+            "Kurti Sets, For Nani/Dadi, For Mom, For Me, On Sale (please resend "
+            "all 7 answers)."
+        )
+        return WAITING_ANSWERS
+
+    _CATEGORY_RENAMES = {"for nani": "For Nani/Dadi", "kurtas": "Kurtis"}
+    categories = [
+        _CATEGORY_RENAMES.get(c.strip().lower(), c.strip()) for c in parsed["categories"]
+    ]
+    categories = [c for c in categories if c.lower() != "on sale"]
+    if parsed["discount_pct"] > 0:
+        categories.append("On Sale")
+
+    draft["material"] = parsed["material"]
+    draft["dupatta_length"] = parsed["length"]
+    draft["price"] = parsed["price"]
+    draft["discount_pct"] = parsed["discount_pct"]
+    draft["categories"] = categories
+    draft["is_bestseller"] = parsed["is_bestseller"]
+    draft["compare_at_price"] = shopify_client.compute_compare_at_price(
+        parsed["price"], parsed["discount_pct"]
+    )
+
+    selected = prompts.resolve_dupatta_pose_selection(parsed["pose_request"])
+    if not selected:
+        await update.message.reply_text(
+            "Couldn't resolve any poses from that — reply with pose numbers "
+            "like \"1, 3\", \"all poses\", or a count like \"3\" for the "
+            "poses question (please resend all 7 answers)."
+        )
+        return WAITING_ANSWERS
+
+    return await _generate_and_send_draft(update.message, context, draft, selected)
+
+
+async def _receive_bottoms_answers(update: Update, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> int:
+    text = update.message.text.strip()
+
+    try:
+        parsed = await ai.parse_bottoms_answers(text)
+    except Exception:
+        logger.exception("Failed to parse bottoms answers")
+        await update.message.reply_text(
+            "Couldn't read that — please reply with all 6 answers in one message."
+        )
+        return WAITING_ANSWERS
+
+    if _ALL_POSES_RE.search(text):
+        parsed["pose_request"] = {"mode": "specific", "pose_numbers": list(prompts.BOTTOMS_POSES), "count": 0}
+
+    invalid_sizes = [s["size"] for s in parsed["sizes"] if s["size"] not in VALID_SIZES]
+    if invalid_sizes or not parsed["sizes"]:
+        await update.message.reply_text(
+            f"Not valid sizes: {', '.join(invalid_sizes) or '(none given)'}.\n"
+            f"Rama Chikan only sells: {', '.join(VALID_SIZES)}. Please resend all 6 answers."
+        )
+        return WAITING_ANSWERS
+
+    if parsed["price"] <= 0:
+        await update.message.reply_text("Price must be a positive number — please resend all 6 answers.")
+        return WAITING_ANSWERS
+
+    if not (0 <= parsed["discount_pct"] < 100):
+        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 6 answers.")
+        return WAITING_ANSWERS
+
+    draft["material"] = parsed["material"]
+    draft["garment_type"] = parsed["garment_type"]
+    draft["size_quantities"] = {s["size"]: s["quantity"] for s in parsed["sizes"]}
+    draft["price"] = parsed["price"]
+    draft["discount_pct"] = parsed["discount_pct"]
+    draft["categories"] = []  # fixed to the Women Bottoms collection, no owner choice
+    draft["is_bestseller"] = parsed["is_bestseller"]
+    draft["compare_at_price"] = shopify_client.compute_compare_at_price(
+        parsed["price"], parsed["discount_pct"]
+    )
+
+    selected, blocked = prompts.resolve_bottoms_pose_selection(
+        parsed["pose_request"], bool(draft.get("bottoms_back_photo"))
+    )
+    if not selected and not blocked:
+        await update.message.reply_text(
+            "Couldn't resolve any poses from that — reply with pose numbers "
+            "like \"1, 3\", \"all poses\", or a count like \"3\" for the "
+            "poses question (please resend all 6 answers)."
+        )
+        return WAITING_ANSWERS
+
+    if blocked:
+        return await _handle_blocked_poses(update.message, draft, selected, blocked)
+
+    return await _generate_and_send_draft(update.message, context, draft, selected)
+
+
+async def _handle_blocked_poses(message, draft: dict, selected: list, blocked: list[tuple]) -> int:
+    """Shared blocked-pose UI (2026-09-29) — was inlined in receive_answers
+    before the four-button restructure split it into three parsers; same
+    behaviour, now reusable by the kurti and bottoms paths (dupatta has
+    nothing blockable, see resolve_dupatta_pose_selection)."""
+    draft["pending_selected_poses"] = selected
+    block_lines = "\n".join(f"- Pose {p}: {reason}" for p, reason in blocked)
+    buttons = []
+    if selected:
+        buttons.append(
+            [InlineKeyboardButton(
+                "▶️ Proceed without these",
+                callback_data=f"proceed_blocked:{draft['session_id']}",
+            )]
+        )
+    buttons.append(
+        [InlineKeyboardButton(
+            "📷 Resend answers / new photo",
+            callback_data=f"cancel_blocked:{draft['session_id']}",
+        )]
+    )
+    msg = "Can't generate some of the poses you asked for:\n" + block_lines
+    if selected:
+        msg += f"\n\nThe rest ({', '.join(str(p) for p in selected)}) can still be generated."
+    else:
+        msg += "\n\nNone of the poses you asked for can be generated as-is."
+    msg += "\n\nProceed without the blocked ones, or resend?"
+    await message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+    return WAITING_ANSWERS
 
 
 async def proceed_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -451,7 +757,7 @@ async def proceed_blocked_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_reply_markup(reply_markup=None)
     selected = draft.pop("pending_selected_poses", [])
     if not selected:
-        await query.message.reply_text("Nothing to generate — resend the 10 answers with different poses.")
+        await query.message.reply_text("Nothing to generate — resend your answers with different poses.")
         return WAITING_ANSWERS
     return await _generate_and_send_draft(query.message, context, draft, selected)
 
@@ -480,14 +786,25 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
     )
 
     draft["active_task"] = asyncio.current_task()
+    listing_type = draft["listing_type"]
     try:
-        images, generated_poses, queued_poses = await image_gen.generate_model_images(
-            draft["raw_photos"], draft.get("front_photo"), draft.get("back_photo"),
-            draft.get("pyjama_photo"),
-            draft["color"], draft["material"],
-            draft["kurti_length"], draft["listing_type"], resolved_poses,
-            draft["categories"],
-        )
+        if listing_type == FLOW_DUPATTA:
+            images, generated_poses, queued_poses = await image_gen.generate_dupatta_images(
+                draft["dupatta_photo"], draft["material"], resolved_poses,
+            )
+        elif listing_type == FLOW_WOMEN_BOTTOMS:
+            images, generated_poses, queued_poses = await image_gen.generate_bottoms_images(
+                draft.get("bottoms_front_photo"), draft.get("bottoms_back_photo"),
+                draft["raw_photos"], draft["garment_type"], draft["material"], resolved_poses,
+            )
+        else:
+            images, generated_poses, queued_poses = await image_gen.generate_model_images(
+                draft["raw_photos"], draft.get("front_photo"), draft.get("back_photo"),
+                draft.get("pyjama_photo"),
+                draft["color"], draft["material"],
+                draft["kurti_length"], listing_type, resolved_poses,
+                draft["categories"],
+            )
         draft["generated_images"] = images
         draft["generated_poses"] = generated_poses
         draft["queued_poses"] = queued_poses
@@ -499,11 +816,11 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
                 f"{len(generated_poses)} generated right now to save API credits.)"
             )
 
-        copy = await ai.generate_description(draft["color"], draft["material"], draft["listing_type"])
+        copy = await ai.generate_description(draft["color"], draft["material"], listing_type)
         draft["title"] = copy["title"]
         draft["description_html"] = copy["description_html"]
         draft["instagram_caption"] = await ai.generate_instagram_caption(
-            images[0], draft["color"], draft["material"], draft["listing_type"]
+            images[0], draft["color"], draft["material"], listing_type
         )
         # Starts the 10-minute clock. setdefault, not assignment: this
         # function only ever runs once per draft (the initial generation),
@@ -513,14 +830,14 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
         logger.warning("Missing reference photo for pose %s: %s", exc.pose_id, exc)
         await message.reply_text(
             f"Can't generate pose {exc.pose_id} — the {exc.reference_kind.upper()} "
-            "reference photo is missing. Send that photo and resend the 10 answers "
+            "reference photo is missing. Send that photo and resend your answers "
             "to retry (nothing else was affected)."
         )
         return WAITING_ANSWERS
     except Exception:
         logger.exception("Image/description generation failed")
         await message.reply_text(
-            "Image generation failed — nothing was published. Send the 10 answers again to retry."
+            "Image generation failed — nothing was published. Send your answers again to retry."
         )
         return WAITING_ANSWERS
     finally:
@@ -546,10 +863,6 @@ def _description_html_to_telegram_text(description_html: str) -> str:
 
 
 def _draft_caption(draft: dict) -> str:
-    sizes_summary = ", ".join(
-        f"{size}: {qty}" for size, qty in draft["size_quantities"].items()
-    )
-    unlisted = [s for s in VALID_SIZES if s not in draft["size_quantities"]]
     price_line = f"₹{draft['price']:.0f}"
     if draft.get("compare_at_price"):
         price_line = f"~₹{draft['compare_at_price']:.0f}~ ₹{draft['price']:.0f}"
@@ -559,18 +872,49 @@ def _draft_caption(draft: dict) -> str:
         "",
         _description_html_to_telegram_text(draft["description_html"]),
         "",
-        f"Material: {draft['material']}",
-        f"Category: {', '.join(draft['categories'])}",
-        f"Length: {draft['kurti_length'].capitalize()}",
-        "Listing: " + (
-            "Kurti + Pyjama Set"
-            + (" (real pyjama reference photo used)" if draft.get("pyjama_photo") else "")
-            if draft["listing_type"] == "kurti_pyjama_set"
-            else "Kurti Only (bottom shown is styling reference, not included)"
-        ),
-        "Poses used: " + ", ".join(str(p) for p in draft["generated_poses"]),
-        f"Sizes in stock: {sizes_summary}",
     ]
+
+    listing_type = draft["listing_type"]
+    unlisted: list[str] = []
+    if listing_type in ("kurti_only", "kurti_pyjama_set"):
+        sizes_summary = ", ".join(
+            f"{size}: {qty}" for size, qty in draft["size_quantities"].items()
+        )
+        unlisted = [s for s in VALID_SIZES if s not in draft["size_quantities"]]
+        lines += [
+            f"Material: {draft['material']}",
+            f"Category: {', '.join(draft['categories'])}",
+            f"Length: {draft['kurti_length'].capitalize()}",
+            "Listing: " + (
+                "Kurti + Pyjama Set"
+                + (" (real pyjama reference photo used)" if draft.get("pyjama_photo") else "")
+                if listing_type == "kurti_pyjama_set"
+                else "Kurti Only (bottom shown is styling reference, not included)"
+            ),
+            "Poses used: " + ", ".join(str(p) for p in draft["generated_poses"]),
+            f"Sizes in stock: {sizes_summary}",
+        ]
+    elif listing_type == "dupatta":
+        lines += [
+            f"Material: {draft['material']}",
+            f"Length: {draft['dupatta_length']}",
+            f"Category: {', '.join(draft['categories'])}",
+            "Listing: Dupatta",
+            "Poses used: " + ", ".join(str(p) for p in draft["generated_poses"]),
+        ]
+    else:  # women_bottoms
+        sizes_summary = ", ".join(
+            f"{size}: {qty}" for size, qty in draft["size_quantities"].items()
+        )
+        unlisted = [s for s in VALID_SIZES if s not in draft["size_quantities"]]
+        lines += [
+            f"Material: {draft['material']}",
+            f"Type: {draft['garment_type']}",
+            "Listing: Women Bottoms",
+            "Poses used: " + ", ".join(str(p) for p in draft["generated_poses"]),
+            f"Sizes in stock: {sizes_summary}",
+        ]
+
     if draft.get("queued_poses"):
         lines.append(
             "Poses queued (not generated yet — API credit cap): "
@@ -755,11 +1099,13 @@ async def go_live_shopify_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
             tags=[draft["material"], draft["color"], *draft["categories"]],
             price=draft["price"],
             compare_at_price=draft["compare_at_price"],
-            size_quantities=draft["size_quantities"],
+            size_quantities=draft.get("size_quantities", {}),
             image_resource_urls=image_urls,
             material=draft["material"],
             categories=draft["categories"],
             is_bestseller=draft["is_bestseller"],
+            listing_type=draft["listing_type"],
+            dupatta_length=draft.get("dupatta_length"),
         )
     except Exception:
         logger.exception("Failed to publish product to Shopify")
@@ -904,8 +1250,18 @@ async def abort_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def build_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[MessageHandler(filters.PHOTO, receive_front_photo)],
+        # /newproduct (2026-09-29 four-button flow restructure) replaces the
+        # old "send any photo" entry point — a session now always starts by
+        # picking one of the 4 category buttons, which decides both the
+        # photo sequence and the question set that follow.
+        entry_points=[CommandHandler("newproduct", start_new_product)],
         states={
+            CHOOSING_FLOW: [
+                CallbackQueryHandler(flow_kurti_tap, pattern="^flow_kurti$"),
+                CallbackQueryHandler(flow_kurti_pyjama_tap, pattern="^flow_kurti_pyjama$"),
+                CallbackQueryHandler(flow_dupatta_tap, pattern="^flow_dupatta$"),
+                CallbackQueryHandler(flow_bottoms_tap, pattern="^flow_bottoms$"),
+            ],
             WAITING_FRONT_PHOTO: [
                 MessageHandler(filters.PHOTO, receive_front_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_front_photo),
@@ -914,13 +1270,21 @@ def build_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.PHOTO, receive_back_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_back_photo),
             ],
-            WAITING_PYJAMA_CHOICE: [
-                CallbackQueryHandler(pyjama_yes_tap, pattern="^pyjama_yes:"),
-                CallbackQueryHandler(pyjama_no_tap, pattern="^pyjama_no:"),
-            ],
             WAITING_PYJAMA_PHOTO: [
                 MessageHandler(filters.PHOTO, receive_pyjama_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_pyjama_photo),
+            ],
+            WAITING_DUPATTA_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_dupatta_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_dupatta_photo),
+            ],
+            WAITING_BOTTOMS_FRONT_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_bottoms_front_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_bottoms_front_photo),
+            ],
+            WAITING_BOTTOMS_BACK_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_bottoms_back_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_for_bottoms_back_photo),
             ],
             WAITING_ANSWERS: [
                 MessageHandler(filters.PHOTO, photo_during_answers),

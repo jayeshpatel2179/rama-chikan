@@ -5,15 +5,17 @@ from telegram.ext import ContextTypes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "Rama Chikan store agent is online.\n\n"
-        "• New product: send the front photo of the garment, then the back photo.\n"
+        "• New product: /newproduct, then pick Kurti, Kurti + Pyjama Set, "
+        "Dupatta, or Women Bottoms.\n"
         "• Out of stock: send the product slug or product URL."
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "New product: send the front photo of the garment, then the back "
-        "photo when I ask for it, then answer the 9 questions I send in one "
+        "New product: /newproduct, then tap Kurti, Kurti + Pyjama Set, "
+        "Dupatta, or Women Bottoms. I'll ask for the right photo(s) for "
+        "that category, then send you its question set to answer in one "
         "message.\n\n"
         "Out of stock: send the product slug or full product URL, confirm "
         "it's the right one, then tell me which size(s) — or say "
@@ -27,6 +29,6 @@ async def unrecognized_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     for this chat and the text isn't a product slug/URL either. Covers
     plain messages like "hi" that would otherwise get silently dropped."""
     await update.effective_message.reply_text(
-        "Send the product photo(s) to start a new listing, or the product "
-        "slug/URL to manage stock. /help for details."
+        "/newproduct to start a new listing, or send the product slug/URL "
+        "to manage stock. /help for details."
     )

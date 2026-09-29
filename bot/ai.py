@@ -170,10 +170,10 @@ _PRODUCT_COPY_SCHEMA = {
 }
 
 
-_ANSWER_PARSE_SCHEMA = {
+_KURTI_ANSWER_PARSE_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
-        "name": "new_product_answers",
+        "name": "kurti_answers",
         "strict": True,
         "schema": {
             "type": "object",
@@ -205,10 +205,6 @@ _ANSWER_PARSE_SCHEMA = {
                 },
                 "is_bestseller": {"type": "boolean"},
                 "kurti_length": {"type": "string", "enum": ["short", "long"]},
-                "listing_type": {
-                    "type": "string",
-                    "enum": ["kurti_pyjama_set", "kurti_only"],
-                },
                 "pose_request": {
                     "type": "object",
                     "properties": {
@@ -232,7 +228,7 @@ _ANSWER_PARSE_SCHEMA = {
             },
             "required": [
                 "material", "sizes", "price", "discount_pct", "categories", "is_bestseller",
-                "kurti_length", "listing_type", "pose_request", "premium_pose_numbers",
+                "kurti_length", "pose_request", "premium_pose_numbers",
             ],
             "additionalProperties": False,
         },
@@ -240,51 +236,18 @@ _ANSWER_PARSE_SCHEMA = {
 }
 
 
-async def parse_new_product_answers(text: str) -> dict:
-    """Extracts the 10 answers (material, sizes+qty, price, discount %,
-    category/categories, bestseller, kurti length, listing type, pose
-    request, premium pose request) from one free-text reply like:
-
-        rayon
-        3 of XS / 1 of S
-        1500
-        20%
-        For Mom
-        yes
-        short
-        kurti + pyjama set
-        1, 5, 3
-        skip
-
-    Sizes must be normalized to the store's exact size codes: XS, S, M, L,
-    XL, XXL, 3XL. discount_pct is 0 if no discount was mentioned. categories
-    can list more than one — the owner may push one item to several
-    discovery tabs at once (e.g. "for nani and for mom", "all three").
-
-    listing_type describes what's being SOLD (set vs kurti only), not what
-    the model wears in the photo — the model always wears a real bottom
-    either way (see bot/prompts.py's listing-type rule); this question was
-    deliberately reworded away from "with/without pyjama" after that
-    phrasing caused the image model to hallucinate bare-legged output.
-
-    pose_request captures Question 9's answer: either specific pose numbers
-    ("1, 5, 3" -> mode 'specific', pose_numbers [1,5,3]) or just a count
-    ("4" -> mode 'count', count 4). The actual pose IDs to generate are
-    resolved afterward by bot.prompts.resolve_pose_selection, not here —
-    this function only extracts what the owner typed.
-
-    premium_pose_numbers captures Question 10's answer (the 13-pose premium
-    editorial menu, e.g. "P1, P6, P9") — empty if the owner skipped it or
-    said no/none. On Sale (categories) is NOT trusted from this extraction
-    for whether the product actually goes on sale — bot/handlers/new_product.py
-    derives that deterministically from discount_pct after parsing, per the
-    spec's "must not appear in On Sale under any circumstance" rule when
-    there's no discount."""
+async def parse_kurti_answers(text: str) -> dict:
+    """Buttons 1 and 2 (Kurti / Kurti + Pyjama Set, 2026-09-29 four-button
+    flow restructure) — identical 9-question set for both; which photos got
+    collected (and therefore kurti_only vs kurti_pyjama_set) was already
+    decided by which button the owner tapped, not asked here. This is the
+    old parse_new_product_answers minus the old Q8 (listing_type) field —
+    everything else is unchanged in meaning."""
     prompt = (
-        "Extract structured answers from this shopkeeper's reply to 10 "
+        "Extract structured answers from this shopkeeper's reply to 9 "
         "questions (material, sizes with quantity, price, discount percent, "
         "category/categories, whether this is a bestseller, kurti length, "
-        "listing type, a pose request, and a premium pose request). "
+        "a pose request, and a premium pose request). "
         "Normalize every size to one of exactly: XS, S, M, L, XL, XXL, 3XL. "
         "If no discount is mentioned, discount_pct is 0. "
         "For the 5th question (category): each category must be exactly one "
@@ -302,10 +265,8 @@ async def parse_new_product_answers(text: str) -> dict:
         "is_bestseller is true only if the reply clearly says "
         "yes/bestseller/best-selling for that question, false for no/not "
         "mentioned. kurti_length must be exactly 'short' or 'long' based on "
-        "that answer. listing_type must be exactly 'kurti_pyjama_set' unless "
-        "the reply clearly says kurti only / just the kurti / no pyjama in the "
-        "listing for that question, in which case it's 'kurti_only'. "
-        "For the 9th question (pose request): if the reply lists specific pose "
+        "that answer. "
+        "For the pose-numbers question: if the reply lists specific pose "
         "numbers (e.g. '1, 5, 3' or '1 5 3' or 'poses 2 and 7'), set mode to "
         "'specific' and pose_numbers to that list of integers (count can be 0). "
         "If the reply says 'all poses' (meaning all 13), set mode to 'specific' "
@@ -314,14 +275,14 @@ async def parse_new_product_answers(text: str) -> dict:
         "images'), set mode to 'count' and count to that integer (pose_numbers "
         "can be empty). If the reply DECLINES standard poses for this question "
         "(e.g. 'no', 'none', 'skip' — typically because the owner only wants "
-        "premium poses from question 10 instead), set mode to 'specific' and "
+        "premium poses instead), set mode to 'specific' and "
         "pose_numbers to an empty list (count can be 0) — this means ZERO "
         "standard poses, not 'pick one for me'. Pose numbers are always "
         "between 1 and 13 (poses 12 and 13 are knee-length crops that only "
         "work if the reply also includes pose 1 or pose 10 respectively — "
         "extract exactly what the reply says either way, don't add or "
         "remove poses yourself). "
-        "For the 10th question (premium pose request): if the reply names "
+        "For the premium pose-numbers question: if the reply names "
         "specific premium poses (e.g. 'P1, P6, P9' or 'premium 1, 6, 9'), set "
         "premium_pose_numbers to that list of strings in the form 'P1'..'P13'. "
         "If the reply says 'all premium' (meaning all 13 premium poses), set "
@@ -333,7 +294,179 @@ async def parse_new_product_answers(text: str) -> dict:
     response = await _client.chat.completions.create(
         model=_TEXT_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        response_format=_ANSWER_PARSE_SCHEMA,
+        response_format=_KURTI_ANSWER_PARSE_SCHEMA,
+    )
+    return json.loads(response.choices[0].message.content)
+
+
+_DUPATTA_ANSWER_PARSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "dupatta_answers",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "material": {"type": "string"},
+                "length": {"type": "string", "enum": ["2.25m", "2.50m", "2.75m"]},
+                "price": {"type": "number"},
+                "discount_pct": {"type": "number"},
+                "categories": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "Premium", "Kurtis", "Kurti Sets", "For Nani/Dadi",
+                            "For Mom", "For Me", "On Sale",
+                        ],
+                    },
+                },
+                "is_bestseller": {"type": "boolean"},
+                "pose_request": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["specific", "count"]},
+                        "pose_numbers": {"type": "array", "items": {"type": "integer"}},
+                        "count": {"type": "integer"},
+                    },
+                    "required": ["mode", "pose_numbers", "count"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": [
+                "material", "length", "price", "discount_pct", "categories",
+                "is_bestseller", "pose_request",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def parse_dupatta_answers(text: str) -> dict:
+    """Button 3 (Dupatta, 2026-09-29). 7 questions: material, length, price,
+    discount, category/categories, bestseller, poses (5-pose menu, no
+    premium tier)."""
+    prompt = (
+        "Extract structured answers from this shopkeeper's reply to 7 "
+        "questions about a dupatta listing (material, length, price, "
+        "discount percent, category/categories, whether this is a "
+        "bestseller, and a pose request). "
+        "length must be exactly one of '2.25m', '2.50m', or '2.75m' — the "
+        "reply may give it as a plain number like '2.25' or '2.5', match it "
+        "to the closest of those three exact values. "
+        "If no discount is mentioned, discount_pct is 0. "
+        "For the category question: each category must be exactly one of "
+        "'Premium', 'Kurtis', 'Kurti Sets', 'For Nani/Dadi', 'For Mom', "
+        "'For Me', or 'On Sale'. The reply may give these as numbers "
+        "(1=Premium, 2=Kurtis, 3=Kurti Sets, 4=For Nani/Dadi, 5=For Mom, "
+        "6=For Me, 7=On Sale) or as names, and may name one or several. "
+        "Don't add On Sale yourself just because a discount was given — "
+        "only include it if the reply actually names it. "
+        "is_bestseller is true only if the reply clearly says "
+        "yes/bestseller/best-selling, false for no/not mentioned. "
+        "For the pose-numbers question: if the reply lists specific pose "
+        "numbers (e.g. '1, 3' or '1 3'), set mode to 'specific' and "
+        "pose_numbers to that list of integers (count can be 0). If the "
+        "reply says 'all poses' (meaning all 5), set mode to 'specific' and "
+        "pose_numbers to [1,2,3,4,5]. If the reply is just a single number "
+        "with no list context (e.g. '3' meaning 'give me 3 images'), set "
+        "mode to 'count' and count to that integer. Pose numbers are always "
+        "between 1 and 5.\n\n"
+        "Reply:\n" + text
+    )
+    response = await _client.chat.completions.create(
+        model=_TEXT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        response_format=_DUPATTA_ANSWER_PARSE_SCHEMA,
+    )
+    return json.loads(response.choices[0].message.content)
+
+
+_BOTTOMS_ANSWER_PARSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "bottoms_answers",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "material": {"type": "string"},
+                "garment_type": {
+                    "type": "string",
+                    "enum": ["Pant", "Plazo", "Balloon Salwar", "Tulip Salwar", "Sharara"],
+                },
+                "sizes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "size": {"type": "string"},
+                            "quantity": {"type": "integer"},
+                        },
+                        "required": ["size", "quantity"],
+                        "additionalProperties": False,
+                    },
+                },
+                "price": {"type": "number"},
+                "discount_pct": {"type": "number"},
+                "is_bestseller": {"type": "boolean"},
+                "pose_request": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["specific", "count"]},
+                        "pose_numbers": {"type": "array", "items": {"type": "integer"}},
+                        "count": {"type": "integer"},
+                    },
+                    "required": ["mode", "pose_numbers", "count"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": [
+                "material", "garment_type", "sizes", "price", "discount_pct",
+                "is_bestseller", "pose_request",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def parse_bottoms_answers(text: str) -> dict:
+    """Button 4 (Women Bottoms, 2026-09-29). 6 questions: material & type,
+    sizes+qty, price, discount, bestseller, poses (5-pose menu). No category
+    question — every product from this flow is fixed to the Women Bottoms
+    collection, handled by the caller, not extracted here."""
+    prompt = (
+        "Extract structured answers from this shopkeeper's reply to 6 "
+        "questions about a women's bottoms listing (material and garment "
+        "type, sizes with quantity, price, discount percent, whether this "
+        "is a bestseller, and a pose request). "
+        "The first question gives BOTH the fabric material and the garment "
+        "type together (e.g. 'Chiffon, Sharara' or 'cotton plazo'). "
+        "garment_type must be matched to exactly one of: 'Pant', 'Plazo', "
+        "'Balloon Salwar', 'Tulip Salwar', 'Sharara' — the reply may use "
+        "close variants (e.g. 'palazzo' -> 'Plazo', 'balloon' -> 'Balloon "
+        "Salwar', 'tulip' -> 'Tulip Salwar'). material is whatever fabric "
+        "word(s) remain (e.g. 'Chiffon'). "
+        "Normalize every size to one of exactly: XS, S, M, L, XL, XXL, 3XL. "
+        "If no discount is mentioned, discount_pct is 0. "
+        "is_bestseller is true only if the reply clearly says "
+        "yes/bestseller/best-selling, false for no/not mentioned. "
+        "For the pose-numbers question: if the reply lists specific pose "
+        "numbers (e.g. '1, 3' or '1 3'), set mode to 'specific' and "
+        "pose_numbers to that list of integers (count can be 0). If the "
+        "reply says 'all poses' (meaning all 5), set mode to 'specific' and "
+        "pose_numbers to [1,2,3,4,5]. If the reply is just a single number "
+        "with no list context (e.g. '3' meaning 'give me 3 images'), set "
+        "mode to 'count' and count to that integer. Pose numbers are always "
+        "between 1 and 5.\n\n"
+        "Reply:\n" + text
+    )
+    response = await _client.chat.completions.create(
+        model=_TEXT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        response_format=_BOTTOMS_ANSWER_PARSE_SCHEMA,
     )
     return json.loads(response.choices[0].message.content)
 
@@ -353,6 +486,18 @@ _INSTAGRAM_CAPTION_SCHEMA = {
 }
 
 
+# listing_type -> the noun phrase used in generated copy (description,
+# Instagram caption). Extended 2026-09-29 for Buttons 3/4 (Dupatta, Women
+# Bottoms) — kurti_only/kurti_pyjama_set entries and their fallback are
+# byte-identical to the pre-restructure behaviour.
+_GARMENT_TYPE_PHRASES = {
+    "kurti_pyjama_set": "kurti and pyjama set",
+    "kurti_only": "kurti",
+    "dupatta": "dupatta",
+    "women_bottoms": "pair of women's bottoms",
+}
+
+
 async def generate_instagram_caption(
     first_image_bytes: bytes,
     color: str,
@@ -367,7 +512,7 @@ async def generate_instagram_caption(
     caption is grounded in what's actually shown, same convention as
     describe_back_reference/detect_color above rather than writing blind
     from the intake answers alone."""
-    garment_type = "kurti and pyjama set" if listing_type == "kurti_pyjama_set" else "kurti"
+    garment_type = _GARMENT_TYPE_PHRASES.get(listing_type, "kurti")
     b64 = base64.b64encode(_downscale_for_analysis(first_image_bytes)).decode("ascii")
     prompt = (
         "You are the Instagram voice of Rama Chikan, a heritage Lucknowi "
@@ -412,7 +557,7 @@ async def generate_description(
     listing_type: str = "kurti_pyjama_set",
     regenerate: bool = False,
 ) -> dict:
-    garment_type = "kurti and pyjama set" if listing_type == "kurti_pyjama_set" else "kurti"
+    garment_type = _GARMENT_TYPE_PHRASES.get(listing_type, "kurti")
     prompt = (
         f"Write an ecommerce product title and description for a {color} "
         f"{garment_type} made of {material}, hand-embroidered with chikankari work. "

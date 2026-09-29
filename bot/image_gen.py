@@ -383,3 +383,126 @@ async def generate_model_images(
     # of the 2026-09-26 spec: upload order/sequence must stay untouched.
     ordered_results = [generated_by_id[pose_id] for pose_id in to_generate]
     return ordered_results, to_generate, queued
+
+
+async def generate_dupatta_images(
+    dupatta_photo: bytes,
+    material: str,
+    resolved_poses: list[int],
+) -> tuple[list[bytes], list[int], list[int]]:
+    """Button 3 (Dupatta, 2026-09-29 four-button flow restructure). Entirely
+    separate from generate_model_images above — one raw photo (the dupatta
+    itself), bot.prompts.DUPATTA_POSES (5 poses, no premium tier, no
+    crop-derived poses), own micro-variation (pick_dupatta_variation).
+
+    Returns (images, pose_ids_generated, pose_ids_queued) — same shape as
+    generate_model_images, respects the same IMAGE_GENERATION_CAP."""
+    to_generate = resolved_poses[:IMAGE_GENERATION_CAP]
+    queued = resolved_poses[IMAGE_GENERATION_CAP:]
+
+    used_combos: set = set()
+    face_reference: bytes | None = None
+    results: list[bytes] = []
+
+    for pose_id in to_generate:
+        reference_images = [io.BytesIO(dupatta_photo)]
+        reference_images[0].name = "raw.png"
+
+        use_face_reference = face_reference is not None
+        if use_face_reference:
+            face_buf = io.BytesIO(face_reference)
+            face_buf.name = "face_reference.png"
+            reference_images.append(face_buf)
+
+        variation = prompts.pick_dupatta_variation(used_combos)
+        prompt = prompts.build_dupatta_pose_prompt(
+            pose_id=pose_id,
+            material=material,
+            variation=variation,
+            has_face_reference=use_face_reference,
+        )
+
+        response = await _client.images.edit(
+            model=IMAGE_GEN_MODEL,
+            image=reference_images,
+            prompt=prompt,
+            size=IMAGE_GEN_SIZE,
+            quality=IMAGE_GEN_QUALITY,
+        )
+        raw_png = base64.b64decode(response.data[0].b64_json)
+        final_png = _crop_to_exact_size(raw_png)
+        results.append(final_png)
+
+        if face_reference is None:
+            face_reference = raw_png
+
+    return results, to_generate, queued
+
+
+async def generate_bottoms_images(
+    front_photo: bytes | None,
+    back_photo: bytes | None,
+    raw_photo_bytes: list[bytes],
+    garment_type: str,
+    material: str,
+    resolved_poses: list[int],
+) -> tuple[list[bytes], list[int], list[int]]:
+    """Button 4 (Women Bottoms, 2026-09-29 four-button flow restructure).
+    Entirely separate from generate_model_images above — bot.prompts.
+    BOTTOMS_POSES (5 poses, front/back reference only, no pyjama/premium
+    tier), one background-variant pick per product
+    (bot.prompts.pick_bottoms_background_variant).
+
+    Returns (images, pose_ids_generated, pose_ids_queued) — same shape as
+    generate_model_images, respects the same IMAGE_GENERATION_CAP."""
+    to_generate = resolved_poses[:IMAGE_GENERATION_CAP]
+    queued = resolved_poses[IMAGE_GENERATION_CAP:]
+
+    background_variant = prompts.pick_bottoms_background_variant()
+    face_reference: bytes | None = None
+    results: list[bytes] = []
+
+    for pose_id in to_generate:
+        pose = prompts.BOTTOMS_POSES[pose_id]
+        is_back = pose.requires_back_reference
+
+        if is_back:
+            if back_photo is None:
+                raise MissingReferenceError(pose_id, "back")
+            garment_bytes = [back_photo]
+        else:
+            garment_bytes = [front_photo] if front_photo is not None else raw_photo_bytes
+
+        reference_images = [io.BytesIO(b) for b in garment_bytes]
+        for buf in reference_images:
+            buf.name = "raw.png"
+
+        use_face_reference = face_reference is not None and not is_back
+        if use_face_reference:
+            face_buf = io.BytesIO(face_reference)
+            face_buf.name = "face_reference.png"
+            reference_images.append(face_buf)
+
+        prompt = prompts.build_bottoms_pose_prompt(
+            pose_id=pose_id,
+            garment_type=garment_type,
+            material=material,
+            background_variant=background_variant,
+            has_face_reference=use_face_reference,
+        )
+
+        response = await _client.images.edit(
+            model=IMAGE_GEN_MODEL,
+            image=reference_images,
+            prompt=prompt,
+            size=IMAGE_GEN_SIZE,
+            quality=IMAGE_GEN_QUALITY,
+        )
+        raw_png = base64.b64decode(response.data[0].b64_json)
+        final_png = _crop_to_exact_size(raw_png)
+        results.append(final_png)
+
+        if face_reference is None and not is_back:
+            face_reference = raw_png
+
+    return results, to_generate, queued

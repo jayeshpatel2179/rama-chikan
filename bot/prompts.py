@@ -345,9 +345,12 @@ def resolve_pose_selection(
     """
 
     def hard_block_reason(pose_id: int) -> str | None:
-        pose = POSES[pose_id]
-        if pose.requires_bottom and listing_type != "kurti_pyjama_set":
-            return "listing is kurti-only, no bottom/pyjama exists to show"
+        # Poses 4/6 (requires_bottom) were hard-blocked for kurti_only until
+        # 2026-09-29 — _listing_rule()'s kurti_only branch always instructs
+        # a plain tonal-match invented bottom (no photo reference needed),
+        # so there's no genuine physical impossibility here anymore; the
+        # owner explicitly asked for these to be selectable on the
+        # kurti-only button (Button 1) of the 4-button flow.
         return None
 
     def auto_ineligible_reason(pose_id: int) -> str | None:
@@ -1256,3 +1259,420 @@ def build_premium_pose_prompt(
         negative_prompt=negative_prompt,
         output_spec=OUTPUT_SPEC,
     )
+
+
+# =============================================================================
+# DUPATTA POSES (Button 3, 2026-09-29 four-button flow restructure) — a
+# third, separate pose library, entirely independent from POSES/PREMIUM_POSES
+# above (neither of those is touched by anything below). One raw photo
+# (the dupatta itself) is the only garment reference; no front/back
+# distinction, no premium tier, no crop-derived poses.
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class DupattaPose:
+    id: int
+    label: str
+    description: str
+
+
+DUPATTA_POSES: dict[int, DupattaPose] = {
+    1: DupattaPose(
+        1, "Full-Length Drape",
+        "Model stands facing camera, full body head to feet in frame, "
+        "wearing the dupatta draped over both shoulders in the classic "
+        "front-open style, one end falling over each shoulder to roughly "
+        "knee height. This is the primary hero shot — the full length, "
+        "border, and drape of the dupatta must be clearly visible.",
+    ),
+    2: DupattaPose(
+        2, "Mid-Length View",
+        "Cropped from just above the head to roughly mid-thigh. Model "
+        "faces the camera or is angled slightly. Shows how the dupatta "
+        "sits across the chest and shoulders, the neckline drape, and the "
+        "border detail at chest height clearly.",
+    ),
+    3: DupattaPose(
+        3, "Material and Embroidery Close-Up",
+        "Tight close-up crop, face out of frame or only the jaw/earring "
+        "visible. Frame fills with the dupatta fabric itself — weave "
+        "texture, sheen, border embroidery or embellishment detail, and "
+        "any print or motif pattern, held or draped so the fabric is flat "
+        "and legible.",
+    ),
+    4: DupattaPose(
+        4, "Draped Over One Shoulder",
+        "Model at a slight three-quarter angle, cropped waist-up to full "
+        "length. The dupatta is worn draped asymmetrically over just one "
+        "shoulder, the rest falling loosely down the back or front, a "
+        "natural candid styling rather than the formal both-shoulder drape "
+        "of pose 1.",
+    ),
+    5: DupattaPose(
+        5, "Held Out to Show Flow",
+        "Model holds one end of the dupatta out and slightly away from "
+        "the body with one hand, arm extended, so the fabric catches light "
+        "movement and falls in a natural flowing curve — showing the "
+        "fabric's drape, weight, and how it moves, not just how it sits "
+        "still. Full or near-full body in frame.",
+    ),
+}
+
+DEFAULT_DUPATTA_PRIORITY_ORDER = [1, 5, 2, 4, 3]
+
+
+def resolve_dupatta_pose_selection(pose_request: dict) -> list[int]:
+    """Same request shape as resolve_pose_selection ({"mode", "pose_numbers",
+    "count"}), simplified: only 5 poses, none of them physically blockable
+    (no bottom/back-reference gating exists in this flow), so there is
+    nothing to return as "blocked" — always returns a plain list."""
+    if pose_request["mode"] == "specific":
+        seen: set[int] = set()
+        selected = []
+        for p in pose_request["pose_numbers"]:
+            if p in DUPATTA_POSES and p not in seen:
+                seen.add(p)
+                selected.append(p)
+        return selected
+    count = max(0, pose_request["count"])
+    return DEFAULT_DUPATTA_PRIORITY_ORDER[:count]
+
+
+# Warm tan/beige seamless studio backdrop matching the 7 reference photos
+# supplied for this feature (Duppatta & Bottoms/Duppatta Poses/), with added
+# styling props in the same vocabulary as PREMIUM_BACKGROUND_SETS above (the
+# reference photos themselves are plain backdrops — the owner's spec
+# explicitly asked for the premium poses' kind of small floor/wall props to
+# be added on top, not an identical bare-background copy).
+DUPATTA_BACKGROUND = (
+    "Warm tan-beige seamless studio backdrop with soft even tonal "
+    "gradation, a light wood-plank floor strip at the base. A small "
+    "weathered terracotta pot sits in one back corner of the frame, and a "
+    "muted vintage-style woven rug lies on the floor at the model's feet. "
+    "Soft diffused daylight-toned lighting, gentle natural shadow, no "
+    "harsh contrast."
+)
+
+# Base outfit worn under the dupatta — a plain, unembellished kurti and
+# bottom in a neutral tone that doesn't compete with the dupatta itself,
+# since the dupatta (not the kurti under it) is what this listing sells.
+# Mirrors the "plain base layer" concept from _listing_rule's kurti_only
+# branch above, applied here to the reverse situation.
+DUPATTA_BASE_OUTFIT = (
+    "a plain, unembellished ivory or off-white kurti and matching bottom "
+    "underneath — never patterned, never the visual focus, styled purely "
+    "as a neutral base layer for the dupatta to be worn over"
+)
+
+DUPATTA_MODEL_SPEC = (
+    "Adult Indian woman aged 24-32, medium-fair complexion, natural "
+    "minimal makeup, calm composed catalogue expression. Hair worn loose "
+    "or in a simple low ponytail. Traditional silver jhumka earrings and "
+    "a stack of silver bangles on one wrist, consistent with classic "
+    "Lucknowi chikankari styling."
+)
+
+DUPATTA_MEGA_PROMPT_TEMPLATE = """\
+{safety_rules}
+
+MODEL: {model_identity}{face_clause}
+
+GARMENT: Photorealistic e-commerce fashion photo of the model wearing the \
+exact dupatta shown in the raw reference photo, made of {material}, with \
+the same fabric texture, border design, embellishment, and colour \
+faithfully reproduced. The model also wears {base_outfit}.
+
+POSE {pose_id} — {pose_label}: {pose_description}
+
+BACKGROUND (locked for this entire product, identical in every image): \
+{background}
+
+LIGHTING: {lighting}
+
+GARMENT PRESENTATION: {cleanup_rule}
+
+FIDELITY: Do not invent, guess, or alter any part of the dupatta that is \
+not visible in the reference photo — render only what is actually shown \
+there. Do not add embroidery, prints, or embellishment the reference does \
+not have.
+
+DO NOT INCLUDE ANY OF: {negative_prompt}
+
+OUTPUT: {output_spec}
+"""
+
+
+def build_dupatta_pose_prompt(
+    *,
+    pose_id: int,
+    material: str,
+    variation: dict,
+    has_face_reference: bool,
+) -> str:
+    pose = DUPATTA_POSES[pose_id]
+
+    face_clause = (
+        " The model's face, skin tone, hair, jewelry, and footwear must "
+        "exactly match the model shown in the additional reference image "
+        "— this is the same person, in the same accessories, just a "
+        "different pose."
+        if has_face_reference
+        else ""
+    )
+
+    model_identity = (
+        f"{DUPATTA_MODEL_SPEC} Gesture for this image: {variation['hand']}; "
+        f"head {variation['head']}; expression: {variation['expression']}."
+    )
+
+    return DUPATTA_MEGA_PROMPT_TEMPLATE.format(
+        safety_rules=SAFETY_RULES,
+        model_identity=model_identity,
+        face_clause=face_clause,
+        material=material,
+        base_outfit=DUPATTA_BASE_OUTFIT,
+        pose_id=pose.id,
+        pose_label=pose.label,
+        pose_description=pose.description,
+        background=DUPATTA_BACKGROUND,
+        lighting=LIGHTING,
+        cleanup_rule=GARMENT_CLEANUP,
+        negative_prompt=NEGATIVE_PROMPT,
+        output_spec=OUTPUT_SPEC,
+    )
+
+
+_DUPATTA_HAND_POSITIONS = [
+    "one hand holding the dupatta's edge lightly",
+    "both hands gently gathering the dupatta at the chest",
+    "one arm extended holding the dupatta out",
+    "one hand resting at the hip, the other adjusting the dupatta",
+]
+_DUPATTA_HEAD_DIRECTIONS = ["facing forward", "turned slightly left", "turned slightly right", "tilted gently down"]
+_DUPATTA_EXPRESSIONS = ["neutral composed", "a faint closed-lip smile", "a soft warm smile"]
+
+
+def pick_dupatta_variation(used_combos: set) -> dict:
+    """Call once per dupatta image within a product — same no-repeat-combo
+    convention as pick_variation, own vocabulary and own used_combos set."""
+    for _ in range(50):
+        hand = random.choice(_DUPATTA_HAND_POSITIONS)
+        head = random.choice(_DUPATTA_HEAD_DIRECTIONS)
+        combo = (hand, head)
+        if combo not in used_combos:
+            used_combos.add(combo)
+            break
+    else:
+        used_combos.add(combo)
+    return {"hand": hand, "head": head, "expression": random.choice(_DUPATTA_EXPRESSIONS)}
+
+
+# =============================================================================
+# WOMEN BOTTOMS POSES (Button 4, 2026-09-29 four-button flow restructure) —
+# a fourth, separate pose library. One shared pose set parameterized by the
+# garment type from Question 1 (Pant / Plazo / Balloon Salwar / Tulip Salwar
+# / Sharara), not 5 separate pose libraries. Front + back raw photos, same
+# reference-binding idea as the kurti flow but much simpler (no pyjama tier,
+# no premium tier).
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class BottomsPose:
+    id: int
+    label: str
+    description: str
+    requires_back_reference: bool = False
+
+
+BOTTOMS_POSES: dict[int, BottomsPose] = {
+    1: BottomsPose(
+        1, "Front Full-Length",
+        "Model stands facing camera, full body waist to feet in frame "
+        "(cropped above the waist, matching the raw reference photos' "
+        "framing), showing the complete silhouette of the garment from "
+        "waistband to hem.",
+    ),
+    2: BottomsPose(
+        2, "Front Hem and Footwear Close-Up",
+        "Close crop from roughly the knee down to the floor, front view, "
+        "showing the hem detail, any border embroidery or print at the "
+        "ankle, and the footwear.",
+    ),
+    3: BottomsPose(
+        3, "Side Hem and Footwear Close-Up",
+        "Close crop from roughly the knee down to the floor, body turned "
+        "to a side profile, showing the hem/ankle detail and footwear "
+        "from the side angle instead of straight-on.",
+    ),
+    4: BottomsPose(
+        4, "Back Full-Length",
+        "Model faces fully away from camera, full body waist to feet in "
+        "frame, showing the back of the garment exactly as the back "
+        "reference photo shows it.",
+        requires_back_reference=True,
+    ),
+    5: BottomsPose(
+        5, "Waist and Fit Close-Up",
+        "Close crop around the waist and hip area, showing the "
+        "waistband, drawstring or closure detail, and how the garment "
+        "sits and fits at the waist.",
+    ),
+}
+
+DEFAULT_BOTTOMS_PRIORITY_ORDER = [1, 4, 2, 3, 5]
+
+
+def resolve_bottoms_pose_selection(
+    pose_request: dict,
+    has_back_reference: bool,
+) -> tuple[list[int], list[tuple[int, str]]]:
+    """Same shape as resolve_pose_selection. Only pose 4 (back) can be
+    blocked, and only for a genuine missing back photo."""
+    def block_reason(pose_id: int) -> str | None:
+        pose = BOTTOMS_POSES[pose_id]
+        if pose.requires_back_reference and not has_back_reference:
+            return "no back-side raw reference photo was supplied"
+        return None
+
+    if pose_request["mode"] == "specific":
+        seen: set[int] = set()
+        selected: list[int] = []
+        blocked: list[tuple[int, str]] = []
+        for p in pose_request["pose_numbers"]:
+            if p not in BOTTOMS_POSES or p in seen:
+                continue
+            seen.add(p)
+            reason = block_reason(p)
+            if reason:
+                blocked.append((p, reason))
+            else:
+                selected.append(p)
+        return selected, blocked
+
+    count = max(0, pose_request["count"])
+    selected = []
+    for pose_id in DEFAULT_BOTTOMS_PRIORITY_ORDER:
+        if len(selected) >= count:
+            break
+        if block_reason(pose_id):
+            continue
+        selected.append(pose_id)
+    return selected, []
+
+
+# Silhouette description per garment type (Question 1), informed by the
+# reference photos supplied for this feature (Duppatta & Bottoms/Bottoms/).
+BOTTOMS_GARMENT_TYPES = ["Pant", "Plazo", "Balloon Salwar", "Tulip Salwar", "Sharara"]
+
+BOTTOMS_GARMENT_TYPE_DESCRIPTIONS = {
+    "Pant": "a straight-cut, slim-fit ankle-length pant with a tapered leg",
+    "Plazo": "a wide-leg, flowing floor-length palazzo with a loose relaxed silhouette from the hip down",
+    "Balloon Salwar": "a voluminous, gathered balloon-shaped salwar that billows out from the hip and cinches in at the ankle",
+    "Tulip Salwar": "a draped, petal-like tulip-cut salwar with fabric crossing and layering at the front, tapered at the ankle",
+    "Sharara": "a flared, tiered sharara with gathered ruffled panels flaring out dramatically from the knee down",
+}
+
+# Rustic wooden-door + plaster-wall backdrop matching the 4 reference photos
+# supplied for this feature (Duppatta & Bottoms/Bottoms/Bottom Pose *.png).
+BOTTOMS_BACKGROUND = (
+    "Rustic weathered wooden door with visible iron rivets fills the right "
+    "side of the frame, against a warm yellow-ochre textured plaster wall "
+    "with an aged, hand-finished look. A black-and-white striped woven "
+    "dhurrie rug covers the floor underfoot. Soft warm natural daylight, "
+    "gentle shadow."
+)
+
+# Small prop/background detail, varied once per product per the owner's
+# spec ("vary a prop or background detail" — not an identical copy of the
+# reference photos every time).
+_BOTTOMS_BACKGROUND_VARIANTS = [
+    "A small weathered clay pot sits on the floor in the corner of the frame.",
+    "A woven cane basket sits on the floor in the corner of the frame.",
+    "A pair of brass anklets rests on the floor near the edge of the rug.",
+    "A second, smaller striped dhurrie is folded in the corner of the frame.",
+]
+
+BOTTOMS_MODEL_SPEC = (
+    "Adult Indian woman aged 24-32, medium-fair complexion, natural "
+    "minimal makeup. A plain, unembellished neutral-toned top or kurti is "
+    "worn above the waist — never patterned, never the visual focus, "
+    "since only the bottom garment is being sold. Silver bangle cuffs on "
+    "one wrist and embroidered juttis, consistent with the reference "
+    "photos' styling."
+)
+
+BOTTOMS_MEGA_PROMPT_TEMPLATE = """\
+{safety_rules}
+
+MODEL: {model_identity}{face_clause}
+
+GARMENT: Photorealistic e-commerce fashion photo of the model wearing the \
+exact {garment_type} bottom shown in the raw reference photos, made of \
+{material}, with the same fabric texture, colour, and any border \
+embroidery or print faithfully reproduced. This is {garment_description}.
+
+POSE {pose_id} — {pose_label}: {pose_description}
+
+BACKGROUND (locked for this entire product, identical in every image): \
+{background} {background_variant}
+
+LIGHTING: {lighting}
+
+GARMENT PRESENTATION: {cleanup_rule}
+
+FIDELITY: Do not invent, guess, or alter any part of the garment that is \
+not visible in the reference photos — render only what is actually shown \
+there. If there is no back-side reference, do not generate a back view.
+
+DO NOT INCLUDE ANY OF: {negative_prompt}
+
+OUTPUT: {output_spec}
+"""
+
+
+def build_bottoms_pose_prompt(
+    *,
+    pose_id: int,
+    garment_type: str,
+    material: str,
+    background_variant: str,
+    has_face_reference: bool,
+) -> str:
+    pose = BOTTOMS_POSES[pose_id]
+
+    face_clause = (
+        " The model's face, skin tone, hair, and styling must exactly "
+        "match the model shown in the additional reference image — this "
+        "is the same person, in the same accessories, just a different "
+        "pose."
+        if has_face_reference
+        else ""
+    )
+
+    return BOTTOMS_MEGA_PROMPT_TEMPLATE.format(
+        safety_rules=SAFETY_RULES,
+        model_identity=BOTTOMS_MODEL_SPEC,
+        face_clause=face_clause,
+        garment_type=garment_type,
+        garment_description=BOTTOMS_GARMENT_TYPE_DESCRIPTIONS.get(
+            garment_type, f"a {garment_type.lower()} styled as shown in the reference photos"
+        ),
+        material=material,
+        pose_id=pose.id,
+        pose_label=pose.label,
+        pose_description=pose.description,
+        background=BOTTOMS_BACKGROUND,
+        background_variant=background_variant,
+        lighting=LIGHTING,
+        cleanup_rule=GARMENT_CLEANUP,
+        negative_prompt=NEGATIVE_PROMPT,
+        output_spec=OUTPUT_SPEC,
+    )
+
+
+def pick_bottoms_background_variant() -> str:
+    """Call ONCE per product — every image for that product reuses the same
+    variant text, same locking convention as pick_background_preset."""
+    return random.choice(_BOTTOMS_BACKGROUND_VARIANTS)

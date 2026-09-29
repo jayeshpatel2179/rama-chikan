@@ -9,6 +9,7 @@ import httpx
 from bot.config import (
     BESTSELLERS_COLLECTION_ID,
     CATEGORY_COLLECTIONS,
+    DUPATTA_COLLECTION_ID,
     FRONTPAGE_COLLECTION_ID,
     KURTAS_COLLECTION_ID,
     MATERIAL_METAFIELD_CHOICES,
@@ -19,6 +20,7 @@ from bot.config import (
     SHOPIFY_CLIENT_SECRET,
     SHOPIFY_STORE_DOMAIN,
     VALID_SIZES,
+    WOMEN_BOTTOMS_COLLECTION_ID,
 )
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,25 @@ mutation productSet($input: ProductSetInput!, $synchronous: Boolean!) {
 """
 
 
+# listing_type -> (Shopify Product Type text, collection every product of
+# that type is unconditionally added to). Added 2026-09-29 for Buttons 3/4
+# (Dupatta, Women Bottoms) — the kurti_pyjama_set/kurti_only entries
+# reproduce the exact pre-restructure hardcoded values ("Kurta Set" /
+# KURTAS_COLLECTION_ID) byte-for-byte, so that path is unchanged.
+_PRODUCT_TYPE_BY_LISTING = {
+    "kurti_pyjama_set": "Kurta Set",
+    "kurti_only": "Kurta Set",
+    "dupatta": "Dupatta",
+    "women_bottoms": "Women Bottoms",
+}
+_ALWAYS_ADD_COLLECTION_BY_LISTING = {
+    "kurti_pyjama_set": KURTAS_COLLECTION_ID,
+    "kurti_only": KURTAS_COLLECTION_ID,
+    "dupatta": DUPATTA_COLLECTION_ID,
+    "women_bottoms": WOMEN_BOTTOMS_COLLECTION_ID,
+}
+
+
 async def create_live_product(
     title: str,
     description_html: str,
@@ -193,38 +214,83 @@ async def create_live_product(
     material: str,
     categories: list[str],
     is_bestseller: bool,
+    listing_type: str = "kurti_pyjama_set",
+    dupatta_length: str | None = None,
 ) -> dict:
     """Creates the product LIVE (status ACTIVE, published to Online Store) —
     this is only called after the owner taps GO LIVE. Every one of the
     store's standard sizes is created as a variant; sizes not mentioned by
     the owner get quantity 0 and inventoryPolicy DENY so they render as
-    "Sold out" and cannot be purchased, rather than being omitted."""
+    "Sold out" and cannot be purchased, rather than being omitted.
+
+    listing_type (2026-09-29): selects productType and the unconditional
+    "always added" collection via the two lookups above. custom.category
+    (below) is a metaobject-backed metafield with a fixed choice list on
+    this store — "Kurta Set" was the one valid value discovered for the
+    kurti flows by trial and error (see MATERIAL_METAFIELD_CHOICES' comment
+    for the same pattern); no equivalent valid value is known yet for
+    Dupatta/Women Bottoms, so that metafield is simply omitted for those two
+    listing types rather than guessing a value and risking an
+    INVALID_METAFIELD error on every Dupatta/Women Bottoms product creation."""
     location_id = await get_primary_location_id()
 
-    variants = []
-    for size in VALID_SIZES:
-        quantity = size_quantities.get(size, 0)
+    if listing_type == "dupatta":
+        # Button 3's question set (bot/handlers/new_product.py) has no
+        # stock-quantity question at all — just a fixed length. Single
+        # variant, "Length" option instead of "Size". DUPATTA_DEFAULT_STOCK_QTY
+        # is a placeholder default (no owner-entered quantity exists to use
+        # instead) — flagged to the owner as worth revisiting if dupattas
+        # need real per-unit inventory tracking later.
+        DUPATTA_DEFAULT_STOCK_QTY = 10
+        length_value = dupatta_length or "2.25m"
         variant = {
-            "optionValues": [{"optionName": "Size", "name": size}],
+            "optionValues": [{"optionName": "Length", "name": length_value}],
             "price": f"{price:.2f}",
-            "sku": f"{title[:20].strip().replace(' ', '-').upper()}-{size}",
+            "sku": f"{title[:20].strip().replace(' ', '-').upper()}-{length_value}",
             "inventoryPolicy": "DENY",
             "inventoryQuantities": [
-                {"locationId": location_id, "name": "available", "quantity": quantity}
+                {"locationId": location_id, "name": "available", "quantity": DUPATTA_DEFAULT_STOCK_QTY}
             ],
         }
         if compare_at_price:
             variant["compareAtPrice"] = f"{compare_at_price:.2f}"
-        variants.append(variant)
+        variants = [variant]
+        product_options = [{"name": "Length", "position": 1, "values": [{"name": length_value}]}]
+    else:
+        variants = []
+        for size in VALID_SIZES:
+            quantity = size_quantities.get(size, 0)
+            variant = {
+                "optionValues": [{"optionName": "Size", "name": size}],
+                "price": f"{price:.2f}",
+                "sku": f"{title[:20].strip().replace(' ', '-').upper()}-{size}",
+                "inventoryPolicy": "DENY",
+                "inventoryQuantities": [
+                    {"locationId": location_id, "name": "available", "quantity": quantity}
+                ],
+            }
+            if compare_at_price:
+                variant["compareAtPrice"] = f"{compare_at_price:.2f}"
+            variants.append(variant)
+        product_options = [
+            {"name": "Size", "position": 1, "values": [{"name": s} for s in VALID_SIZES]}
+        ]
 
-    metafields = [
-        {
-            "namespace": "custom",
-            "key": "category",
-            "type": "single_line_text_field",
-            "value": PRODUCT_CATEGORY_METAFIELD_VALUE,
-        }
-    ]
+    metafields = []
+    if listing_type in ("kurti_pyjama_set", "kurti_only"):
+        # custom.category is a metaobject-backed metafield with a fixed
+        # choice list on this store — "Kurta Set" is the one valid value
+        # known for the kurti flows. No equivalent valid value is known for
+        # Dupatta/Women Bottoms yet, so it's omitted for those rather than
+        # guessing and risking INVALID_METAFIELD (see docstring above).
+        metafields.append(
+            {
+                "namespace": "custom",
+                "key": "category",
+                "type": "single_line_text_field",
+                "value": PRODUCT_CATEGORY_METAFIELD_VALUE,
+            }
+        )
     resolved_material = resolve_material_metafield(material)
     if resolved_material:
         metafields.append(
@@ -236,36 +302,36 @@ async def create_live_product(
             }
         )
 
-    # Every size is ALWAYS created as a real variant below (0 quantity +
-    # DENY policy for sizes the owner didn't stock) so the product page can
-    # show "Sold out" instead of omitting the size entirely. That means
-    # Shopify's native storefront Size filter -- which matches on variant
-    # EXISTENCE, not stock -- can never actually narrow anything, since
-    # every product technically "has" every size. This metafield is the
-    # real, accurate list of which sizes are actually in stock right now;
-    # it's what the storefront's Size filter should be pointed at instead
-    # of (or in addition to) the native variant-option filter. Purely
-    # additive -- doesn't touch the variant-creation logic or the
-    # sold-out-badge behavior at all.
-    in_stock_sizes = [s for s in VALID_SIZES if size_quantities.get(s, 0) > 0]
-    metafields.append(
-        {
-            "namespace": "custom",
-            "key": "available_sizes",
-            "type": "list.single_line_text_field",
-            "value": json.dumps(in_stock_sizes),
-        }
-    )
+    if listing_type != "dupatta":
+        # Every size is ALWAYS created as a real variant above (0 quantity +
+        # DENY policy for sizes the owner didn't stock) so the product page can
+        # show "Sold out" instead of omitting the size entirely. That means
+        # Shopify's native storefront Size filter -- which matches on variant
+        # EXISTENCE, not stock -- can never actually narrow anything, since
+        # every product technically "has" every size. This metafield is the
+        # real, accurate list of which sizes are actually in stock right now;
+        # it's what the storefront's Size filter should be pointed at instead
+        # of (or in addition to) the native variant-option filter. Purely
+        # additive -- doesn't touch the variant-creation logic or the
+        # sold-out-badge behavior at all. Doesn't apply to Dupatta, which has
+        # no Size option at all (see the variant branch above).
+        in_stock_sizes = [s for s in VALID_SIZES if size_quantities.get(s, 0) > 0]
+        metafields.append(
+            {
+                "namespace": "custom",
+                "key": "available_sizes",
+                "type": "list.single_line_text_field",
+                "value": json.dumps(in_stock_sizes),
+            }
+        )
 
     input_payload = {
         "title": title,
         "descriptionHtml": description_html,
         "status": "ACTIVE",
-        "productType": "Kurta Set",
+        "productType": _PRODUCT_TYPE_BY_LISTING.get(listing_type, "Kurta Set"),
         "tags": tags,
-        "productOptions": [
-            {"name": "Size", "position": 1, "values": [{"name": s} for s in VALID_SIZES]}
-        ],
+        "productOptions": product_options,
         "variants": variants,
         "files": [
             {"originalSource": url, "contentType": "IMAGE"} for url in image_resource_urls
@@ -279,13 +345,16 @@ async def create_live_product(
         raise RuntimeError(f"Shopify product creation error: {result['userErrors']}")
     product = result["product"]
 
-    # Every live product goes into Kurtas (main nav) plus the 2 homepage
+    # Every live product goes into its flow's always-add collection (main
+    # nav — Kurtas for kurti flows, Dupattas/Women Bottoms for the other two,
+    # via _ALWAYS_ADD_COLLECTION_BY_LISTING above) plus the 2 homepage
     # "curated" collections (New Arrivals, the Home page grid) — those two
     # are manually-sorted on Shopify's side, so nothing shows there unless
     # explicitly added here. Bestsellers only gets products the owner
     # actually flagged as a bestseller.
-    collection_ids = [KURTAS_COLLECTION_ID, NEW_ARRIVALS_COLLECTION_ID, FRONTPAGE_COLLECTION_ID]
-    tile_collection_ids = [KURTAS_COLLECTION_ID]
+    always_add_collection_id = _ALWAYS_ADD_COLLECTION_BY_LISTING.get(listing_type, KURTAS_COLLECTION_ID)
+    collection_ids = [always_add_collection_id, NEW_ARRIVALS_COLLECTION_ID, FRONTPAGE_COLLECTION_ID]
+    tile_collection_ids = [always_add_collection_id]
     for category in categories:
         category_key = category.strip().lower()
         collection_id = CATEGORY_COLLECTIONS.get(category_key)
