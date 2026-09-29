@@ -1,15 +1,17 @@
 """Tiny on-disk state store for things that must survive a bot restart but
-don't need a real database — currently just which background preset was
-used last, so background alternation (A -> B -> A -> ...) across products
-keeps going correctly after a restart instead of resetting.
+don't need a real database — background-preset rotation, and (2026-09-29)
+the per-chat "last confirmed Yes" timestamp for the idle push-confirm gate
+(bot/handlers/start.py), which explicitly needs to survive a Railway
+restart/redeploy since its window is 24 hours.
 
 Note: the project has a Postgres URL sitting unused in .env
 (DATABASE_URL) — if that ever gets wired up for something else, this is a
 natural candidate to migrate into it. Not worth standing up a DB connection
-for one string value today.
+for a handful of small values today.
 """
 
 import json
+import time
 from pathlib import Path
 
 _STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "agent_state.json"
@@ -51,3 +53,32 @@ def next_premium_background_set() -> str:
     state["last_premium_background_set"] = next_set
     _save(state)
     return next_set
+
+
+# --- Idle push-confirm gate, "once per 24 hours" (2026-09-29) --------------
+# Keyed by chat_id (a string, since JSON object keys are always strings) —
+# matches this bot's existing per-CHAT (not per-Telegram-user) session
+# model (see new_product.py's per_user=False comment: Telegram's "send
+# anonymously" group option makes per-user identity unreliable here anyway).
+
+YES_GATE_WINDOW_SECONDS = 24 * 60 * 60
+
+
+def record_confirm_yes(chat_id: int) -> None:
+    """Call exactly when the owner taps "Yes" on the idle push-confirm
+    prompt — never on the 24h-skip path itself, which only reads this."""
+    state = _load()
+    yes_at = state.setdefault("last_confirm_yes_at", {})
+    yes_at[str(chat_id)] = time.time()
+    _save(state)
+
+
+def confirm_yes_is_fresh(chat_id: int) -> bool:
+    """True if this chat answered "Yes" within the last 24 hours — the
+    idle confirm prompt should be skipped (go straight to the 4 category
+    buttons) whenever this is True."""
+    state = _load()
+    yes_at = state.get("last_confirm_yes_at", {}).get(str(chat_id))
+    if yes_at is None:
+        return False
+    return (time.time() - yes_at) < YES_GATE_WINDOW_SECONDS

@@ -19,11 +19,25 @@ logger = logging.getLogger(__name__)
 WAITING_PRODUCT, WAITING_ACTION, WAITING_SIZES, WAITING_DELETE_CONFIRM = range(4)
 
 # Matches either a full product URL ("…/products/some-handle") or a bare
-# handle-looking string (a few hyphen-separated lowercase/number segments)
-# sent on its own — distinct enough from the new-product flow's free-text
-# answers that the two entry points don't collide.
+# handle-looking string (hyphen-separated lowercase/number segments) sent on
+# its own — distinct enough from the new-product flow's free-text answers
+# that the two entry points don't collide.
+#
+# 2026-09-29 bug fix: the bare-handle alternative used to cap at 7 segments
+# ({1,6} additional groups) — any real handle longer than that (a fairly
+# short AI-generated title already produces 8-9 segments, and Shopify's
+# auto-appended "-1"/"-2" duplicate-title suffix pushes shorter ones over
+# too) silently failed to match, so the message never even reached this
+# ConversationHandler; it fell through to the idle catch-all instead, with
+# no error of any kind. Confirmed by testing the old pattern directly
+# against real generated-title-shaped handles. The full-URL alternative was
+# never affected (unbounded already) — only typing the bare slug alone hit
+# this. Removed the upper cap ({1,6} -> {1,}) but kept the "at least one
+# hyphen" floor (still {1,...}, not {0,...}) — that floor is what keeps a
+# plain idle word like "hi" or "hello" from being misread as a product
+# handle and falling into this flow instead of the idle Yes/No prompt.
 PRODUCT_REF_FILTER = filters.Regex(
-    r"(?i)(/products/[a-z0-9\-]+)|^[a-z0-9]+(-[a-z0-9]+){1,6}$"
+    r"(?i)(/products/[a-z0-9\-]+)|^[a-z0-9]+(-[a-z0-9]+){1,}$"
 )
 
 _ACTION_KEYBOARD = InlineKeyboardMarkup(
@@ -123,10 +137,12 @@ async def delete_confirm_tap(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         await shopify_client.delete_product(product["id"])
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to delete product")
         await query.message.reply_text(
-            "Something went wrong deleting this on Shopify — nothing was changed. Try again."
+            f"Couldn't delete *{product['title']}* — nothing was changed.\n"
+            f"Reason: {exc}\n\nTry again, or send the product slug/URL again to retry.",
+            parse_mode="Markdown",
         )
         return ConversationHandler.END
 
@@ -172,10 +188,12 @@ async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         await shopify_client.mark_variants_out_of_stock(inventory_items)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to mark variants out of stock")
         await update.message.reply_text(
-            "Something went wrong updating Shopify — nothing was changed. Try again."
+            f"Couldn't update *{product['title']}* on Shopify — nothing was changed.\n"
+            f"Reason: {exc}\n\nTry again, or send the product slug/URL again to retry.",
+            parse_mode="Markdown",
         )
         return ConversationHandler.END
 

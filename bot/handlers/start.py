@@ -1,6 +1,9 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from bot import state
+from bot.handlers.new_product import _flow_choice_keyboard
+
 
 def _start_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -41,7 +44,22 @@ async def unrecognized_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     plain messages like "hi" or random text that would otherwise get
     silently dropped — offers to start a new listing (2026-09-29) instead
     of just pointing at /newproduct, so any idle message doubles as an
-    entry point."""
+    entry point.
+
+    2026-09-29: if this chat answered "Yes" within the last 24 hours
+    (persisted — bot/state.py, survives a restart), skips the confirm
+    question entirely and goes straight to the 4 category buttons — the
+    SAME message start_new_product/confirm_yes_tap send, so tapping one
+    works identically (those 4 buttons are registered as entry points on
+    bot.handlers.new_product's ConversationHandler)."""
+    chat_id = update.effective_chat.id
+    if state.confirm_yes_is_fresh(chat_id):
+        context.chat_data.clear()
+        await update.effective_message.reply_text(
+            "What are you listing?", reply_markup=_flow_choice_keyboard()
+        )
+        return
+
     await update.effective_message.reply_text(
         "Do you want to push a product to Rama Chikan Store and its socials?",
         reply_markup=_start_confirm_keyboard(),

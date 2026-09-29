@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from bot import ai, image_gen, instagram, prompts, shopify_client
+from bot import ai, image_gen, instagram, prompts, shopify_client, state
 from bot.config import VALID_SIZES
 from bot.handlers.cancel import cancel
 
@@ -186,11 +186,16 @@ _ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
 _ALL_PREMIUM_RE = re.compile(r"\ball\s+premium\b", re.I)
 
 # The ready-to-post draft (generated images + description, sitting in memory
-# waiting for a GO LIVE tap) expires 10 minutes after it's generated. GO LIVE
-# and Regenerate Description both stop working past this and tell the owner
-# it expired; ABORT always keeps working regardless, so an expired draft can
-# still be cleared out without waiting for a fresh /cancel.
-DRAFT_TTL_SECONDS = 10 * 60
+# waiting for a GO LIVE tap) expires 30 minutes after it's generated
+# (2026-09-29: was 10 minutes, unified with the new PROACTIVE expiry below
+# so there's one consistent number instead of two different expiry
+# behaviours). GO LIVE and Regenerate Description both stop working past
+# this and tell the owner it expired (checked reactively, on the next tap —
+# see _draft_expired/_reply_expired below); ABORT always keeps working
+# regardless. _schedule_draft_expiry below is the PROACTIVE half — fires on
+# its own after this same TTL even with zero taps at all, per Part 5 of the
+# 2026-09-29 session-gating spec.
+DRAFT_TTL_SECONDS = 30 * 60
 
 
 def _new_session_id() -> str:
@@ -246,12 +251,65 @@ async def _reply_dead_session(query) -> None:
 
 
 async def _reply_expired(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.answer("⏰ This draft has expired — send new photos to start again.", show_alert=True)
+    """The REACTIVE half of draft expiry — fires when the owner taps a
+    GO LIVE/regenerate button after DRAFT_TTL_SECONDS has already passed.
+    See _schedule_draft_expiry for the PROACTIVE half (fires on its own,
+    no tap required)."""
+    await query.answer("⏰ This draft has expired — /newproduct to start again.", show_alert=True)
     await query.edit_message_reply_markup(reply_markup=None)
+    draft = context.chat_data.get("draft") or {}
+    _cancel_expiry_timer(draft)
     await query.message.reply_text(
-        "This draft expired (ready for more than 10 minutes) — send new photos to start again."
+        f"This draft expired (ready for more than {DRAFT_TTL_SECONDS // 60} minutes) "
+        "— /newproduct to start again."
     )
     context.chat_data.clear()
+
+
+def _cancel_expiry_timer(draft: dict) -> None:
+    """Cancels the proactive 30-minute expiry task (see
+    _schedule_draft_expiry) if one is running — called wherever a draft's
+    session genuinely ends (finalized, aborted, or already reactively
+    expired) so the timer doesn't fire a redundant/stale message later."""
+    task = draft.pop("expiry_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def _schedule_draft_expiry(context: ContextTypes.DEFAULT_TYPE, chat_id: int, session_id: str) -> "asyncio.Task":
+    """PROACTIVE half of draft expiry (Part 5, 2026-09-29) — unlike
+    _reply_expired (which only fires reactively, when the owner taps
+    something after time's up), this fires on its own after
+    DRAFT_TTL_SECONDS even if the owner never touches the draft again.
+    Plain in-process asyncio task: this bot has no job queue/scheduler
+    installed and chat_data itself is already in-memory-only (a restart
+    wipes the whole draft anyway), so this doesn't add any new
+    restart-survival gap — see the discovery note in this task's report.
+
+    Re-checks session_id before acting (same pattern as _live_draft) in
+    case this exact draft was already finalized/aborted/replaced by a new
+    one in the same chat by the time the timer fires — cancelling the task
+    at those points (_cancel_expiry_timer) is the primary guard, this is
+    the defensive fallback."""
+
+    async def _fire():
+        await asyncio.sleep(DRAFT_TTL_SECONDS)
+        draft = context.chat_data.get("draft")
+        if draft is None or draft.get("session_id") != session_id:
+            return
+        context.chat_data.clear()
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⏰ This draft expired (no completed posting within "
+                    f"{DRAFT_TTL_SECONDS // 60} minutes) — /newproduct to start again."
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to send proactive draft-expiry notification")
+
+    return asyncio.create_task(_fire())
 
 
 def _live_draft(context: ContextTypes.DEFAULT_TYPE, session_id: str) -> dict | None:
@@ -293,9 +351,16 @@ async def confirm_yes_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     unrecognized_text, 2026-09-29) — same effect as /newproduct, just
     reached from a button tap on any idle message instead of the command.
     Registered as an ADDITIONAL entry point on this same ConversationHandler
-    (see build_conversation_handler below), not a separate flow."""
+    (see build_conversation_handler below), not a separate flow.
+
+    Records this "Yes" (persisted, survives a restart — bot/state.py) so
+    the next 24 hours of idle messages in this chat skip straight past the
+    confirm question (see unrecognized_text). A "No" never suppresses
+    anything — the confirm question is asked again on the very next idle
+    message, per spec."""
     query = update.callback_query
     await query.answer()
+    state.record_confirm_yes(update.effective_chat.id)
     context.chat_data.clear()
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(
@@ -838,10 +903,17 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
         draft["instagram_caption"] = await ai.generate_instagram_caption(
             images[0], draft["color"], draft["material"], listing_type
         )
-        # Starts the 10-minute clock. setdefault, not assignment: this
-        # function only ever runs once per draft (the initial generation),
-        # but stays defensive against being called twice for the same draft.
+        # Starts the reactive 30-minute clock. setdefault, not assignment:
+        # this function only ever runs once per draft (the initial
+        # generation), but stays defensive against being called twice for
+        # the same draft.
         draft.setdefault("ready_at", time.monotonic())
+        # Starts the PROACTIVE 30-minute clock (Part 5, 2026-09-29) — only
+        # once per draft, same defensiveness as ready_at above.
+        if "expiry_task" not in draft:
+            draft["expiry_task"] = _schedule_draft_expiry(
+                context, message.chat_id, draft["session_id"]
+            )
     except image_gen.MissingReferenceError as exc:
         logger.warning("Missing reference photo for pose %s: %s", exc.pose_id, exc)
         await message.reply_text(
@@ -1082,11 +1154,55 @@ async def regen_caption_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return CONFIRMING
 
 
+async def _maybe_finalize_session(message, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> int:
+    """Part 4 of the 2026-09-29 session-gating spec: once BOTH platforms
+    have been ATTEMPTED at least once (success or failure — draft
+    "shopify_attempted"/"instagram_attempted", set by go_live_shopify_tap /
+    go_live_instagram_tap right after their own attempt resolves, in
+    either order), report the final combined status and end the session so
+    /newproduct or an idle message can start a fresh one — PTB won't
+    re-check entry points while this ConversationHandler still has a
+    tracked state for the chat, so ending it here is what actually
+    unblocks that, not just a courtesy message.
+
+    Only one platform having been attempted so far -> no-op, returns
+    CONFIRMING unchanged (existing independent-buttons behaviour, both
+    buttons stay pressable/retryable exactly as before this spec)."""
+    if not (draft.get("shopify_attempted") and draft.get("instagram_attempted")):
+        return CONFIRMING
+
+    _cancel_expiry_timer(draft)
+
+    shopify_line = (
+        f"✅ Shopify: live — {draft.get('shopify_url', '')}"
+        if draft.get("shopify_published")
+        else "❌ Shopify: did not go live"
+    )
+    posted_to = [
+        label
+        for label, key in (("Instagram", "instagram_published"), ("Facebook", "facebook_published"))
+        if draft.get(key)
+    ]
+    social_line = (
+        f"✅ Social: posted to {', '.join(posted_to)}"
+        if posted_to
+        else "❌ Social: nothing posted (Instagram and Facebook both failed)"
+    )
+    await message.reply_text(
+        "Both platforms have been attempted for this product:\n"
+        f"{shopify_line}\n{social_line}\n\n"
+        "Ready for the next product — /newproduct, or just send a message."
+    )
+    context.chat_data.clear()
+    return ConversationHandler.END
+
+
 async def go_live_shopify_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """GO LIVE — SHOPIFY (Part 6). Publishes to Shopify exactly as before —
-    unchanged logic. Independent of Instagram: does not touch it, and
-    doesn't clear the session, so GO LIVE — INSTAGRAM stays pressable
-    afterward (in either order)."""
+    unchanged logic. Independent of Instagram: does not touch it directly.
+    Since 2026-09-29 (Part 4 session-gating spec), marks this platform
+    "attempted" either way and checks whether BOTH platforms are now
+    attempted — see _maybe_finalize_session."""
     query = update.callback_query
     session_id = query.data.split(":", 1)[1]
     draft = _live_draft(context, session_id)
@@ -1125,33 +1241,37 @@ async def go_live_shopify_tap(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     except Exception:
         logger.exception("Failed to publish product to Shopify")
+        draft["shopify_attempted"] = True
         await query.message.reply_text(
             "Something went wrong publishing this to Shopify — nothing went live. "
             "Tap GO LIVE — SHOPIFY again to retry, or ABORT to discard this draft."
         )
-        return CONFIRMING
+        return await _maybe_finalize_session(query.message, context, draft)
 
     draft["shopify_published"] = True
+    draft["shopify_attempted"] = True
     draft["shopify_url"] = f"https://ramachikan.com/products/{product['handle']}"
     await query.edit_message_reply_markup(reply_markup=_draft_keyboard(session_id, draft))
     await query.message.reply_text(
         f"🟢 Live on Shopify: *{product['title']}*\n{draft['shopify_url']}",
         parse_mode="Markdown",
     )
-    return CONFIRMING
+    return await _maybe_finalize_session(query.message, context, draft)
 
 
 async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """"Go IG + FB" (Part 6; Facebook added 2026-09-23). Posts ALL generated
     images (as one carousel per platform when there are 2+, max 10 each)
     plus caption/hashtags via upload-post, to Instagram AND Facebook in one
-    call. Independent of Shopify: does not touch it, and doesn't clear the
-    session either way. The two platforms are reported separately — one can
-    succeed while the other fails (e.g. the Facebook Page isn't connected in
-    Upload-Post yet) — and the button is only marked done (draft["instagram_published"])
-    if at least one platform actually posted, so a fully-failed attempt is
-    always retryable without risking a duplicate post on the platform that
-    already worked."""
+    call. Independent of Shopify: does not touch it directly. The two
+    platforms are reported separately — one can succeed while the other
+    fails (e.g. the Facebook Page isn't connected in Upload-Post yet) —
+    and the button is only marked done (draft["instagram_published"]) if at
+    least one platform actually posted, so a fully-failed attempt is always
+    retryable without risking a duplicate post on the platform that already
+    worked. Since 2026-09-29 (Part 4 session-gating spec), marks this
+    platform "attempted" either way and checks whether BOTH platforms are
+    now attempted — see _maybe_finalize_session."""
     query = update.callback_query
     session_id = query.data.split(":", 1)[1]
     draft = _live_draft(context, session_id)
@@ -1178,11 +1298,12 @@ async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TY
         results = await instagram.post_images(images, draft["instagram_caption"])
     except instagram.UploadPostError as exc:
         logger.exception("Failed to publish product to Instagram/Facebook")
+        draft["instagram_attempted"] = True
         await query.message.reply_text(
             f"Something went wrong posting — nothing was posted.\n{exc}\n"
             "Tap Go IG + FB again to retry, or ABORT to discard this draft."
         )
-        return CONFIRMING
+        return await _maybe_finalize_session(query.message, context, draft)
     except asyncio.CancelledError:
         raise
     finally:
@@ -1214,6 +1335,7 @@ async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TY
         return text
 
     ig, fb = results["instagram"], results["facebook"]
+    draft["instagram_attempted"] = True
 
     await query.message.reply_text(_report("Instagram", "📸", ig))
     if ig.success:
@@ -1239,7 +1361,7 @@ async def go_live_instagram_tap(update: Update, context: ContextTypes.DEFAULT_TY
                 raise
     else:
         await query.message.reply_text("Nothing posted. Tap Go IG + FB again to retry.")
-    return CONFIRMING
+    return await _maybe_finalize_session(query.message, context, draft)
 
 
 async def abort_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1252,6 +1374,7 @@ async def abort_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
+    _cancel_expiry_timer(draft)
     who = update.effective_user.full_name if update.effective_user else "someone"
     already_done = []
     if draft.get("shopify_published"):
@@ -1272,10 +1395,20 @@ def build_conversation_handler() -> ConversationHandler:
         # photo sequence and the question set that follow. confirm_yes_tap
         # is the same entry reached via the idle "Do you want to push a
         # product..." Yes button (bot/handlers/start.py's unrecognized_text)
-        # instead of the command.
+        # instead of the command. The 4 flow_*_tap handlers are ALSO
+        # registered here (in addition to inside CHOOSING_FLOW below) so
+        # that the 24h "Yes was recent" skip path (unrecognized_text sending
+        # the 4-button message directly, without the confirm question) can
+        # be tapped straight from idle too, not only from within
+        # CHOOSING_FLOW — the two registrations never conflict, since PTB
+        # only consults entry_points when this chat has no tracked state.
         entry_points=[
             CommandHandler("newproduct", start_new_product),
             CallbackQueryHandler(confirm_yes_tap, pattern="^start_confirm_yes$"),
+            CallbackQueryHandler(flow_kurti_tap, pattern="^flow_kurti$"),
+            CallbackQueryHandler(flow_kurti_pyjama_tap, pattern="^flow_kurti_pyjama$"),
+            CallbackQueryHandler(flow_dupatta_tap, pattern="^flow_dupatta$"),
+            CallbackQueryHandler(flow_bottoms_tap, pattern="^flow_bottoms$"),
         ],
         states={
             CHOOSING_FLOW: [
