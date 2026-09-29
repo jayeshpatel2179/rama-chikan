@@ -288,6 +288,22 @@ async def start_new_product(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return CHOOSING_FLOW
 
 
+async def confirm_yes_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """"Yes" on the idle confirm prompt (bot/handlers/start.py's
+    unrecognized_text, 2026-09-29) — same effect as /newproduct, just
+    reached from a button tap on any idle message instead of the command.
+    Registered as an ADDITIONAL entry point on this same ConversationHandler
+    (see build_conversation_handler below), not a separate flow."""
+    query = update.callback_query
+    await query.answer()
+    context.chat_data.clear()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "What are you listing?", reply_markup=_flow_choice_keyboard()
+    )
+    return CHOOSING_FLOW
+
+
 def _new_draft(context: ContextTypes.DEFAULT_TYPE, listing_type: str) -> dict:
     draft = context.chat_data.setdefault("draft", {})
     draft["session_id"] = _new_session_id()
@@ -1253,8 +1269,14 @@ def build_conversation_handler() -> ConversationHandler:
         # /newproduct (2026-09-29 four-button flow restructure) replaces the
         # old "send any photo" entry point — a session now always starts by
         # picking one of the 4 category buttons, which decides both the
-        # photo sequence and the question set that follow.
-        entry_points=[CommandHandler("newproduct", start_new_product)],
+        # photo sequence and the question set that follow. confirm_yes_tap
+        # is the same entry reached via the idle "Do you want to push a
+        # product..." Yes button (bot/handlers/start.py's unrecognized_text)
+        # instead of the command.
+        entry_points=[
+            CommandHandler("newproduct", start_new_product),
+            CallbackQueryHandler(confirm_yes_tap, pattern="^start_confirm_yes$"),
+        ],
         states={
             CHOOSING_FLOW: [
                 CallbackQueryHandler(flow_kurti_tap, pattern="^flow_kurti$"),
