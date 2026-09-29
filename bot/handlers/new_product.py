@@ -46,76 +46,77 @@ logger = logging.getLogger(__name__)
 # Short menu labels for the chat — distinct from POSES[n].label (which is
 # the fuller name used in the mega prompt) so the intake message stays scannable.
 _POSE_MENU_LABELS = {
-    1: "Front full-length",
+    1: "Front full",
     2: "Front waist-up",
     3: "Embroidery close-up",
     4: "Bottom only",
-    5: "Side three-quarter full-length",
-    6: "Hem & footwear close-up",
-    7: "Three-quarter, looking down",
-    8: "Waist-up, soft downward gaze",
-    9: "Waist-up, looking to the side",
-    10: "Back full-length",
-    11: "Back over-the-shoulder",
-    12: "Knee-length front (needs pose 1 also selected)",
-    13: "Knee-length back (needs pose 10 also selected)",
+    5: "Side 3/4 full",
+    6: "Hem+footwear",
+    7: "3/4 looking down",
+    8: "Waist-up soft gaze",
+    9: "Waist-up side gaze",
+    10: "Back full",
+    11: "Back over-shoulder",
+    12: "Knee front (+1)",
+    13: "Knee back (+10)",
 }
 assert set(_POSE_MENU_LABELS) == set(prompts.POSES), "pose menu is out of sync with bot.prompts.POSES"
-_POSE_MENU = "\n".join(f"{n} = {label}" for n, label in _POSE_MENU_LABELS.items())
+# Grouped a few per line (2026-09-29) instead of one long "·"-joined line —
+# a dense single line was hard for the shop owner to scan on a phone.
+_POSE_MENU_LINES = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11], [12, 13]]
+assert {n for line in _POSE_MENU_LINES for n in line} == set(_POSE_MENU_LABELS), (
+    "pose menu line groups are out of sync with _POSE_MENU_LABELS"
+)
+_POSE_MENU = "\n".join(
+    " · ".join(f"*{n}* {_POSE_MENU_LABELS[n]}" for n in line) for line in _POSE_MENU_LINES
+)
 
 # Short menu labels for Question 10 (premium editorial poses) — same
 # convention as _POSE_MENU_LABELS above, kept in sync with prompts.PREMIUM_POSES.
 _PREMIUM_POSE_MENU_LABELS = {
-    "P1": "Full-length standing, styled set",
-    "P2": "Waist-up, looking to the side",
-    "P3": "Leaning on wall, hand in hair",
-    "P4": "Full-length in arched doorway",
-    "P5": "Leaning on pillar, hands clasped",
-    "P6": "Reclining on window seat",
-    "P7": "Seated close-up with bolster cushion",
-    "P8": "Seated on floor, hand on cheek",
-    "P9": "Back full-length",
-    "P10": "Back over-the-shoulder",
+    "P1": "Full standing set",
+    "P2": "Waist-up side",
+    "P3": "Wall lean/hair",
+    "P4": "Doorway full",
+    "P5": "Pillar lean",
+    "P6": "Window seat",
+    "P7": "Seated w/bolster",
+    "P8": "Floor seated/cheek",
+    "P9": "Back full",
+    "P10": "Back over-shoulder",
     "P11": "Embroidery close-up",
-    "P12": "Knee-length front (needs P1 also selected)",
-    "P13": "Knee-length back (needs P9 also selected)",
+    "P12": "Knee front (+P1)",
+    "P13": "Knee back (+P9)",
 }
 assert set(_PREMIUM_POSE_MENU_LABELS) == set(prompts.PREMIUM_POSES), (
     "premium pose menu is out of sync with bot.prompts.PREMIUM_POSES"
 )
-_PREMIUM_POSE_MENU = "\n".join(f"{n} = {label}" for n, label in _PREMIUM_POSE_MENU_LABELS.items())
+_PREMIUM_POSE_MENU_LINES = [
+    ["P1", "P2", "P3"], ["P4", "P5", "P6"], ["P7", "P8"], ["P9", "P10", "P11"], ["P12", "P13"],
+]
+assert {n for line in _PREMIUM_POSE_MENU_LINES for n in line} == set(_PREMIUM_POSE_MENU_LABELS), (
+    "premium pose menu line groups are out of sync with _PREMIUM_POSE_MENU_LABELS"
+)
+_PREMIUM_POSE_MENU = "\n".join(
+    " · ".join(f"*{n}* {_PREMIUM_POSE_MENU_LABELS[n]}" for n in line) for line in _PREMIUM_POSE_MENU_LINES
+)
 
 _QUESTIONS_MESSAGE = (
-    "A few quick questions — reply to all of them in ONE message:\n\n"
-    "1. Material type (e.g. rayon, georgette, chikankari work)\n"
-    "2. Sizes with quantity — e.g. \"3 of XS / 1 of S\". Sizes you don't mention "
-    "will show on the site as out of stock.\n"
-    "3. Price (the real selling price, e.g. 1500)\n"
-    "4. Discount % to display (e.g. 20%, or say \"none\")\n"
-    "5. Category — which collections should this go into? (name one or more)\n"
-    "   1 = Premium\n"
-    "   2 = Kurtis\n"
-    "   3 = Kurti Sets\n"
-    "   4 = For Nani/Dadi\n"
-    "   5 = For Mom\n"
-    "   6 = For Me\n"
-    "   7 = On Sale\n"
-    "   (On Sale is added automatically whenever question 4's discount is "
-    "above 0% — you don't need to pick it yourself, and it won't be added "
-    "if there's no discount.)\n"
-    "6. Is this a best-selling kurti? (yes/no)\n"
-    "7. Kurti length — short or long?\n"
-    "8. What's in this listing — kurti + pyjama set, or kurti only?\n"
-    "9. How many images, and which poses? Reply with pose numbers, e.g. "
-    "\"1, 5, 3\" — or type \"all poses\" for all 13 — or just give a number "
-    "like \"4\" and I'll pick the best combination. (Poses 12/13 are "
-    "knee-length crops of poses 1/10 — include 1 or 10 too if you want "
-    "them.)\n" + _POSE_MENU + "\n\n"
-    "10. Want premium editorial shots instead? Reply with premium pose "
-    "numbers (e.g. \"P1, P6, P9\"), or skip to use the standard poses from "
-    "Q9. (P12/P13 are knee-length crops of P1/P9 — include P1 or P9 too if "
-    "you want them.)\n" + _PREMIUM_POSE_MENU + "\n\nAlso accept \"all "
-    "premium\" to generate all 13."
+    "Quick details: reply all in ONE message:\n\n"
+    "🧵 *1)* Material (e.g. rayon, chikankari)\n"
+    "📏 *2)* Sizes + qty (e.g. \"3 XS, 1 S\"). Unlisted sizes = out of stock\n"
+    "💰 *3)* Price (₹)\n"
+    "🏷️ *4)* Discount % (or \"none\")\n"
+    "🗂️ *5)* Category: *1* Premium / *2* Kurtis / *3* Kurti Sets / *4* Nani-Dadi / "
+    "*5* Mom / *6* Me / *7* On Sale (auto-added if discount > 0, skip it)\n"
+    "⭐ *6)* Bestseller? y/n\n"
+    "↕️ *7)* Length: short/long\n"
+    "👗 *8)* Kurti+pyjama set or kurti only?\n"
+    "📸 *9)* Poses: numbers (e.g. \"1,5,3\"), \"all poses\" for all 13, or a "
+    "count (e.g. \"4\"). Poses *12*/*13* need pose *1*/*10* also selected:\n"
+    + _POSE_MENU + "\n\n"
+    "✨ *10)* Premium instead? P-numbers (e.g. \"P1,P6,P9\"), \"all premium,\" or "
+    "skip. P*12*/P*13* need P*1*/P*9* also selected:\n" + _PREMIUM_POSE_MENU
 )
 
 _ALL_POSES_RE = re.compile(r"\ball\s+poses\b", re.I)
@@ -278,7 +279,7 @@ async def pyjama_no_tap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(_QUESTIONS_MESSAGE)
+    await query.message.reply_text(_QUESTIONS_MESSAGE, parse_mode="Markdown")
     return WAITING_ANSWERS
 
 
@@ -296,7 +297,7 @@ async def receive_pyjama_photo(update: Update, context: ContextTypes.DEFAULT_TYP
     draft["pyjama_photo"] = bytes(await file.download_as_bytearray())
 
     await update.message.reply_text("Got the pyjama photo.")
-    await update.message.reply_text(_QUESTIONS_MESSAGE)
+    await update.message.reply_text(_QUESTIONS_MESSAGE, parse_mode="Markdown")
     return WAITING_ANSWERS
 
 
