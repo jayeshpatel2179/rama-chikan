@@ -311,16 +311,6 @@ _DUPATTA_ANSWER_PARSE_SCHEMA = {
                 "length": {"type": "string", "enum": ["2.25m", "2.50m", "2.75m"]},
                 "price": {"type": "number"},
                 "discount_pct": {"type": "number"},
-                "categories": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "Premium", "Kurtis", "Kurti Sets", "For Nani/Dadi",
-                            "For Mom", "For Me", "On Sale",
-                        ],
-                    },
-                },
                 "is_bestseller": {"type": "boolean"},
                 "pose_request": {
                     "type": "object",
@@ -334,7 +324,7 @@ _DUPATTA_ANSWER_PARSE_SCHEMA = {
                 },
             },
             "required": [
-                "material", "length", "price", "discount_pct", "categories",
+                "material", "length", "price", "discount_pct",
                 "is_bestseller", "pose_request",
             ],
             "additionalProperties": False,
@@ -344,25 +334,21 @@ _DUPATTA_ANSWER_PARSE_SCHEMA = {
 
 
 async def parse_dupatta_answers(text: str) -> dict:
-    """Button 3 (Dupatta, 2026-09-29). 7 questions: material, length, price,
-    discount, category/categories, bestseller, poses (5-pose menu, no
-    premium tier)."""
+    """Button 3 (Dupatta, 2026-09-30). 6 questions: material, length, price,
+    discount, bestseller, poses (5-pose menu, no premium tier). No category
+    question — every product from this flow is fixed to the Dupatta
+    collection, handled by the caller, not extracted here (2026-09-30: the
+    category question was removed at the owner's request since Dupattas
+    already have their own dedicated storefront collection)."""
     prompt = (
-        "Extract structured answers from this shopkeeper's reply to 7 "
+        "Extract structured answers from this shopkeeper's reply to 6 "
         "questions about a dupatta listing (material, length, price, "
-        "discount percent, category/categories, whether this is a "
-        "bestseller, and a pose request). "
+        "discount percent, whether this is a bestseller, and a pose "
+        "request). "
         "length must be exactly one of '2.25m', '2.50m', or '2.75m' — the "
         "reply may give it as a plain number like '2.25' or '2.5', match it "
         "to the closest of those three exact values. "
         "If no discount is mentioned, discount_pct is 0. "
-        "For the category question: each category must be exactly one of "
-        "'Premium', 'Kurtis', 'Kurti Sets', 'For Nani/Dadi', 'For Mom', "
-        "'For Me', or 'On Sale'. The reply may give these as numbers "
-        "(1=Premium, 2=Kurtis, 3=Kurti Sets, 4=For Nani/Dadi, 5=For Mom, "
-        "6=For Me, 7=On Sale) or as names, and may name one or several. "
-        "Don't add On Sale yourself just because a discount was given — "
-        "only include it if the reply actually names it. "
         "is_bestseller is true only if the reply clearly says "
         "yes/bestseller/best-selling, false for no/not mentioned. "
         "For the pose-numbers question: if the reply lists specific pose "

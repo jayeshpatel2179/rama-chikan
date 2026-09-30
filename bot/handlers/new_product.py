@@ -150,10 +150,8 @@ _DUPATTA_QUESTIONS_MESSAGE = (
     "📏 *2)* Length: 2.25m / 2.50m / 2.75m\n"
     "💰 *3)* Price (₹)\n"
     "🏷️ *4)* Discount % (or \"none\")\n"
-    "🗂️ *5)* Category: *1* Premium / *2* Kurtis / *3* Kurti Sets / *4* Nani-Dadi / "
-    "*5* Mom / *6* Me / *7* On Sale (auto-added if discount > 0, skip it)\n"
-    "⭐ *6)* Bestseller? y/n\n"
-    "📸 *7)* Poses: numbers (e.g. \"1,3\"), \"all poses\" for all 5, or a count:\n"
+    "⭐ *5)* Bestseller? y/n\n"
+    "📸 *6)* Poses: numbers (e.g. \"1,3\"), \"all poses\" for all 5, or a count:\n"
     + _DUPATTA_POSE_MENU
 )
 
@@ -683,7 +681,7 @@ async def _receive_dupatta_answers(update: Update, context: ContextTypes.DEFAULT
     except Exception:
         logger.exception("Failed to parse dupatta answers")
         await update.message.reply_text(
-            "Couldn't read that — please reply with all 7 answers in one message."
+            "Couldn't read that — please reply with all 6 answers in one message."
         )
         return WAITING_ANSWERS
 
@@ -691,34 +689,18 @@ async def _receive_dupatta_answers(update: Update, context: ContextTypes.DEFAULT
         parsed["pose_request"] = {"mode": "specific", "pose_numbers": list(prompts.DUPATTA_POSES), "count": 0}
 
     if parsed["price"] <= 0:
-        await update.message.reply_text("Price must be a positive number — please resend all 7 answers.")
+        await update.message.reply_text("Price must be a positive number — please resend all 6 answers.")
         return WAITING_ANSWERS
 
     if not (0 <= parsed["discount_pct"] < 100):
-        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 7 answers.")
+        await update.message.reply_text("Discount % must be between 0 and 100 — please resend all 6 answers.")
         return WAITING_ANSWERS
-
-    if not parsed["categories"]:
-        await update.message.reply_text(
-            "Didn't catch a category — reply with one or more of Premium, Kurtis, "
-            "Kurti Sets, For Nani/Dadi, For Mom, For Me, On Sale (please resend "
-            "all 7 answers)."
-        )
-        return WAITING_ANSWERS
-
-    _CATEGORY_RENAMES = {"for nani": "For Nani/Dadi", "kurtas": "Kurtis"}
-    categories = [
-        _CATEGORY_RENAMES.get(c.strip().lower(), c.strip()) for c in parsed["categories"]
-    ]
-    categories = [c for c in categories if c.lower() != "on sale"]
-    if parsed["discount_pct"] > 0:
-        categories.append("On Sale")
 
     draft["material"] = parsed["material"]
     draft["dupatta_length"] = parsed["length"]
     draft["price"] = parsed["price"]
     draft["discount_pct"] = parsed["discount_pct"]
-    draft["categories"] = categories
+    draft["categories"] = []  # fixed to the Dupatta collection, no owner choice (2026-09-30)
     draft["is_bestseller"] = parsed["is_bestseller"]
     draft["compare_at_price"] = shopify_client.compute_compare_at_price(
         parsed["price"], parsed["discount_pct"]
@@ -729,7 +711,7 @@ async def _receive_dupatta_answers(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(
             "Couldn't resolve any poses from that — reply with pose numbers "
             "like \"1, 3\", \"all poses\", or a count like \"3\" for the "
-            "poses question (please resend all 7 answers)."
+            "poses question (please resend all 6 answers)."
         )
         return WAITING_ANSWERS
 
@@ -986,7 +968,6 @@ def _draft_caption(draft: dict) -> str:
         lines += [
             f"Material: {draft['material']}",
             f"Length: {draft['dupatta_length']}",
-            f"Category: {', '.join(draft['categories'])}",
             "Listing: Dupatta",
             "Poses used: " + ", ".join(str(p) for p in draft["generated_poses"]),
         ]
