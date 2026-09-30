@@ -1359,11 +1359,83 @@ DUPATTA_BACKGROUND = (
 # since the dupatta (not the kurti under it) is what this listing sells.
 # Mirrors the "plain base layer" concept from _listing_rule's kurti_only
 # branch above, applied here to the reverse situation.
-DUPATTA_BASE_OUTFIT = (
-    "a plain, unembellished ivory or off-white kurti and matching bottom "
-    "underneath — never patterned, never the visual focus, styled purely "
-    "as a neutral base layer for the dupatta to be worn over"
-)
+#
+# 2026-09-30: the kurti's colour is no longer always ivory — it's picked
+# once per dupatta (see pick_dupatta_kurti_color/DUPATTA_KURTI_COLOR_TABLE
+# below) from a fixed table keyed off the dupatta's own detected colour, so
+# a maroon dupatta doesn't get styled over the same ivory base as every
+# other one. The kurti is still a generic AI-styled presentation piece —
+# never linked to a real catalogue product.
+def _dupatta_base_outfit(kurti_color: str) -> str:
+    return (
+        f"a plain, unembellished {kurti_color} kurti and matching bottom "
+        "underneath — never patterned, never the visual focus, styled "
+        "purely as a neutral base layer for the dupatta to be worn over"
+    )
+
+
+# Fixed dupatta-colour-family -> paired kurti colour table (2026-09-30).
+# Deliberately a plain lookup, not left to the image model's free judgment,
+# so results are consistent and reviewable. Edit the values here to retune
+# the pairings — nothing else needs to change.
+#
+# Where the brand brief offered more than one acceptable kurti colour for a
+# family, one fixed choice was picked so every dupatta in that family always
+# pairs the same way (still tune-able by editing this dict):
+#   White/Ivory  -> Blush Pink (avoids a flat all-white-on-white look)
+#   Maroon/Red   -> Blush Pink (soft contrast against a bold dupatta)
+#   everything else -> Ivory (safe, classic neutral)
+DUPATTA_KURTI_COLOR_TABLE = {
+    "white_ivory": "Blush Pink",
+    "pastel_pink": "Ivory",
+    "mustard_yellow": "Ivory",
+    "maroon_red": "Blush Pink",
+    "green": "Ivory",
+    "blue": "Ivory",
+    "orange_rust": "Ivory",
+    "black": "Ivory",
+}
+DUPATTA_KURTI_COLOR_DEFAULT = "Ivory"  # any dupatta colour not recognized below
+
+# Ordered (family, keywords) list used to classify the free-text colour
+# string from ai.detect_color into one of the families above. Order matters
+# where a word could plausibly belong to more than one family (e.g. "rust
+# red" — checked against orange_rust before maroon_red so it lands there,
+# since "rust" is the more specific term). This is plain keyword matching,
+# not an AI call — kept deterministic on purpose (Part 0.3 of the spec).
+_DUPATTA_COLOR_FAMILY_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("black", ["black", "jet black"]),
+    ("white_ivory", ["white", "ivory", "off-white", "off white", "cream", "pearl", "bone"]),
+    ("mustard_yellow", ["mustard", "yellow", "golden", "gold", "lemon"]),
+    ("orange_rust", ["orange", "rust", "coral", "tangerine"]),
+    ("maroon_red", ["maroon", "wine", "crimson", "burgundy", "red"]),
+    ("pastel_pink", ["pink", "peach", "blush", "rose"]),
+    ("green", ["green", "olive", "mint", "emerald", "teal"]),
+    ("blue", ["blue", "navy", "turquoise", "indigo"]),
+]
+
+
+def classify_dupatta_color_family(detected_color: str) -> str | None:
+    """Buckets a free-text colour (from ai.detect_color) into one of
+    DUPATTA_KURTI_COLOR_TABLE's family keys via plain keyword matching.
+    Returns None if nothing matches (caller falls back to the default)."""
+    lowered = detected_color.strip().lower()
+    for family, keywords in _DUPATTA_COLOR_FAMILY_KEYWORDS:
+        if any(keyword in lowered for keyword in keywords):
+            return family
+    return None
+
+
+def pick_dupatta_kurti_color(detected_color: str) -> str:
+    """The one lookup this whole feature is built on: dupatta's detected
+    colour -> paired kurti colour, via the fixed table above. Called ONCE
+    per dupatta session (see image_gen.generate_dupatta_images) and reused
+    for every pose generated for that dupatta, so the paired kurti colour
+    never changes mid-session."""
+    family = classify_dupatta_color_family(detected_color)
+    if family is None:
+        return DUPATTA_KURTI_COLOR_DEFAULT
+    return DUPATTA_KURTI_COLOR_TABLE.get(family, DUPATTA_KURTI_COLOR_DEFAULT)
 
 DUPATTA_MODEL_SPEC = (
     "Adult Indian woman aged 24-32, medium-fair complexion, natural "
@@ -1409,6 +1481,7 @@ def build_dupatta_pose_prompt(
     material: str,
     variation: dict,
     has_face_reference: bool,
+    kurti_color: str = DUPATTA_KURTI_COLOR_DEFAULT,
 ) -> str:
     pose = DUPATTA_POSES[pose_id]
 
@@ -1431,7 +1504,7 @@ def build_dupatta_pose_prompt(
         model_identity=model_identity,
         face_clause=face_clause,
         material=material,
-        base_outfit=DUPATTA_BASE_OUTFIT,
+        base_outfit=_dupatta_base_outfit(kurti_color),
         pose_id=pose.id,
         pose_label=pose.label,
         pose_description=pose.description,

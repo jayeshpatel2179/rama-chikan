@@ -389,17 +389,27 @@ async def generate_dupatta_images(
     dupatta_photo: bytes,
     material: str,
     resolved_poses: list[int],
+    dupatta_color: str = "",
 ) -> tuple[list[bytes], list[int], list[int]]:
     """Button 3 (Dupatta, 2026-09-29 four-button flow restructure). Entirely
     separate from generate_model_images above — one raw photo (the dupatta
     itself), bot.prompts.DUPATTA_POSES (5 poses, no premium tier, no
     crop-derived poses), own micro-variation (pick_dupatta_variation).
 
+    dupatta_color (2026-09-30): the dupatta's detected dominant colour
+    (ai.detect_color's output) — looked up ONCE here, before the pose loop,
+    via prompts.pick_dupatta_kurti_color, exactly the same "compute once,
+    reuse every pose" pattern already used for face_reference below, so
+    every pose generated for this one dupatta shows the identical paired
+    kurti colour. A new dupatta session calls this function fresh, so it
+    runs the lookup independently each time.
+
     Returns (images, pose_ids_generated, pose_ids_queued) — same shape as
     generate_model_images, respects the same IMAGE_GENERATION_CAP."""
     to_generate = resolved_poses[:IMAGE_GENERATION_CAP]
     queued = resolved_poses[IMAGE_GENERATION_CAP:]
 
+    kurti_color = prompts.pick_dupatta_kurti_color(dupatta_color)
     used_combos: set = set()
     face_reference: bytes | None = None
     results: list[bytes] = []
@@ -420,6 +430,7 @@ async def generate_dupatta_images(
             material=material,
             variation=variation,
             has_face_reference=use_face_reference,
+            kurti_color=kurti_color,
         )
 
         response = await _client.images.edit(

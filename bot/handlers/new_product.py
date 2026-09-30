@@ -854,6 +854,7 @@ async def _generate_and_send_draft(message, context: ContextTypes.DEFAULT_TYPE, 
         if listing_type == FLOW_DUPATTA:
             images, generated_poses, queued_poses = await image_gen.generate_dupatta_images(
                 draft["dupatta_photo"], draft["material"], resolved_poses,
+                dupatta_color=draft.get("color", ""),
             )
         elif listing_type == FLOW_WOMEN_BOTTOMS:
             images, generated_poses, queued_poses = await image_gen.generate_bottoms_images(
