@@ -69,10 +69,19 @@ def build_application() -> Application:
     # conversation's own /cancel fallback takes it first; this one only
     # fires when nothing is active.
     application.add_handler(CommandHandler("cancel", cancel_idle))
-    # group=1: only reached when nothing in group 0 (the commands and both
-    # ConversationHandlers above) claimed the update — i.e. no session is
-    # active for this chat and the text wasn't a recognized product
-    # slug/URL either. Catches plain unrecognized text like "hi".
+    # group=1: catches plain unrecognized text like "hi" that no group-0
+    # handler wanted. 2026-09-30 correction: PTB does NOT skip this group
+    # just because a group-0 handler already handled the update — every
+    # group is independently checked against every update, so without
+    # something explicit, this handler would ALSO fire alongside (not
+    # instead of) out_of_stock.py's product-slug/URL flow on every text
+    # message, e.g. showing the 4-button menu right on top of a delete
+    # confirmation. The out_of_stock ConversationHandler's own callbacks now
+    # raise ApplicationHandlerStop on every text-consuming state transition
+    # specifically to stop this group from running for those updates — see
+    # bot/handlers/out_of_stock.py's receive_product_ref docstring. This
+    # handler only actually runs when nothing in group 0 claimed the update
+    # AND no group-0 handler raised ApplicationHandlerStop.
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, unrecognized_text), group=1
     )

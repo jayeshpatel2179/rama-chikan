@@ -2,6 +2,7 @@ import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -50,6 +51,25 @@ _ACTION_KEYBOARD = InlineKeyboardMarkup(
 
 
 async def receive_product_ref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """2026-09-30 routing fix: every text-consuming return in this function
+    (and in receive_sizes_to_mark below) raises ApplicationHandlerStop(state)
+    instead of plainly `return`ing the state. See that exception's own
+    docstring — python-telegram-bot evaluates EVERY handler group for EVERY
+    update by default; a plain `return` here only tells THIS
+    ConversationHandler what to do next, it does nothing to stop
+    bot.handlers.start.unrecognized_text (registered in the next group,
+    group=1) from ALSO independently matching the exact same text update and
+    firing right alongside it. That's what was actually causing a product
+    slug/URL to appear to be "swallowed" by the 4-button menu — the delete
+    flow was running correctly the whole time, the menu was just an
+    unwanted EXTRA message stacked on top of it, worst right after a
+    completed posting cycle (chat_data["draft"] is None and the 24h
+    confirm-Yes gate is fresh at exactly that moment, so unrecognized_text's
+    "already said Yes recently" branch fires instead of its milder Yes/No
+    nudge). Raising ApplicationHandlerStop here both sets this
+    ConversationHandler's next state AND stops every lower-priority group
+    from touching this update at all, regardless of what state the
+    out-of-stock conversation is currently in."""
     text = update.message.text.strip()
     try:
         product = await shopify_client.lookup_product(text)
@@ -62,10 +82,11 @@ async def receive_product_ref(update: Update, context: ContextTypes.DEFAULT_TYPE
             "Couldn't find that product — send the product slug or the full "
             "product URL again."
         )
-        return WAITING_PRODUCT
+        raise ApplicationHandlerStop(WAITING_PRODUCT)
 
     context.chat_data["oos_product"] = product
-    return await _send_action_menu(update.message, product)
+    new_state = await _send_action_menu(update.message, product)
+    raise ApplicationHandlerStop(new_state)
 
 
 async def _send_action_menu(message, product: dict) -> int:
@@ -154,6 +175,10 @@ async def delete_confirm_tap(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """See receive_product_ref's docstring for why every text-consuming
+    return below raises ApplicationHandlerStop(state) instead of a plain
+    `return` — same routing fix, same reason, applied consistently to the
+    rest of this conversation's text-answer states."""
     text = update.message.text.strip().lower()
     product = context.chat_data["oos_product"]
     variants = product["variants"]["nodes"]
@@ -168,7 +193,7 @@ async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TY
                 'Didn\'t catch a valid size — reply with size(s) like "M" or "M XL", '
                 'or say "mark whole product out of stock".'
             )
-            return WAITING_SIZES
+            raise ApplicationHandlerStop(WAITING_SIZES)
 
         target_variants = [
             v
@@ -179,7 +204,7 @@ async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(
                 "None of those sizes exist on this product — check the size list above and resend."
             )
-            return WAITING_SIZES
+            raise ApplicationHandlerStop(WAITING_SIZES)
 
     inventory_items = [
         {"inventory_item_id": v["inventoryItem"]["id"], "current_quantity": v["inventoryQuantity"]}
@@ -195,7 +220,7 @@ async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TY
             f"Reason: {exc}\n\nTry again, or send the product slug/URL again to retry.",
             parse_mode="Markdown",
         )
-        return ConversationHandler.END
+        raise ApplicationHandlerStop(ConversationHandler.END)
 
     changed_sizes = sorted(
         {
@@ -211,7 +236,7 @@ async def receive_sizes_to_mark(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode="Markdown",
     )
     context.chat_data.pop("oos_product", None)
-    return ConversationHandler.END
+    raise ApplicationHandlerStop(ConversationHandler.END)
 
 
 def build_conversation_handler() -> ConversationHandler:
